@@ -2,6 +2,7 @@
 import os
 import re
 import subprocess
+import time
 from typing import Optional
 from dataclasses import dataclass
 
@@ -74,8 +75,41 @@ class DownloadWorker(QThread):
             
             logger.debug(f"Command: {' '.join(cmd)}")
             
-            # Execute download
-            success, output_file, error_msg = self._execute_command(cmd)
+            # Execute download with retries and timeout awareness
+            max_attempts = max(1, getattr(self.settings, "retry_attempts", 0) + 1)
+            attempt = 1
+            success = False
+            output_file: Optional[str] = None
+            error_msg: Optional[str] = None
+            
+            while attempt <= max_attempts and not self._should_cancel:
+                if attempt > 1:
+                    logger.info(
+                        f"Retrying download task {self.task.id} "
+                        f"(attempt {attempt}/{max_attempts})"
+                    )
+                
+                success, output_file, error_msg = self._execute_command(cmd)
+                
+                if success or self._should_cancel:
+                    break
+                
+                # Classify and potentially shorten the error message for UI/logs
+                classified_error = self._classify_error_message(error_msg or "")
+                error_msg = classified_error
+                
+                # Only retry on transient / retryable errors
+                if not self._is_retryable_error(error_msg) or attempt == max_attempts:
+                    break
+                
+                # Simple exponential backoff between retries (max ~30s)
+                backoff_seconds = min(5 * attempt, 30)
+                logger.info(
+                    f"Will retry task {self.task.id} in {backoff_seconds} seconds "
+                    "due to transient error."
+                )
+                time.sleep(backoff_seconds)
+                attempt += 1
             
             if self._should_cancel:
                 self.finished.emit(STATUS_CANCELLED, "", "Download cancelled by user")
@@ -86,7 +120,7 @@ class DownloadWorker(QThread):
                 self.finished.emit(STATUS_COMPLETED, output_file or "", "")
             else:
                 logger.error(f"Task {self.task.id} failed: {error_msg}")
-                self.finished.emit(STATUS_FAILED, "", error_msg or "Download failed")
+                self.finished.emit(STATUS_FAILED, "", (error_msg or "Download failed"))
         
         except Exception as e:
             logger.exception(f"Exception in download task {self.task.id}")
@@ -159,6 +193,14 @@ class DownloadWorker(QThread):
             (success, output_file, error_message)
         """
         try:
+            # Prepare environment for subprocess so spotdl sees Spotify credentials
+            env = os.environ.copy()
+            client_id = getattr(self.settings, "spotify_client_id", "")
+            client_secret = getattr(self.settings, "spotify_client_secret", "")
+            if client_id and client_secret:
+                env["SPOTIPY_CLIENT_ID"] = client_id
+                env["SPOTIPY_CLIENT_SECRET"] = client_secret
+
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -166,6 +208,7 @@ class DownloadWorker(QThread):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=env,
             )
         except FileNotFoundError:
             return (False, None, f"Command not found: {cmd[0]}")
@@ -176,11 +219,28 @@ class DownloadWorker(QThread):
         output_file = None
         last_progress = 0
         
+        # Apply a soft timeout based on settings to avoid hanging indefinitely
+        timeout_seconds = getattr(self.settings, "timeout_seconds", 300) or 300
+        try:
+            timeout_seconds = int(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout_seconds = 300
+        timeout_seconds = max(30, min(timeout_seconds, 3600))
+        start_time = time.time()
+        
         while True:
             if self._should_cancel:
                 if self._process.poll() is None:
                     self._process.terminate()
                 return (False, None, "Cancelled by user")
+            
+            # Check for timeout (best-effort; assumes the process is still producing output)
+            if timeout_seconds and (time.time() - start_time) > timeout_seconds:
+                if self._process.poll() is None:
+                    self._process.terminate()
+                msg = f"Download timed out after {timeout_seconds} seconds"
+                output_lines.append(f"SpotiPlay: {msg}\n")
+                return (False, output_file, msg)
             
             line = self._process.stdout.readline() if self._process.stdout else ""
             
@@ -257,3 +317,62 @@ class DownloadWorker(QThread):
             return (100, "", "")
         
         return (current, "", "")
+    
+    def _classify_error_message(self, raw_error: str) -> str:
+        """Map low-level errors from spotdl/Spotify into a user-friendly message.
+
+        This keeps messages short for the UI and highlights common Spotify issues
+        like rate limits (HTTP 429).
+        """
+        text = (raw_error or "").strip()
+        if not text:
+            return "Download failed"
+
+        lower = text.lower()
+
+        # Spotify rate limiting / HTTP 429
+        if "429 error responses" in lower or "rate/request limit" in lower or "max retries reached" in lower:
+            return (
+                "Spotify is rate-limiting your account (HTTP 429). "
+                "Please wait a while (up to 24 hours) and reduce parallel downloads "
+                "or the number of playlists you download at once."
+            )
+
+        # Generic network / provider errors
+        if "audio providererror" in lower or "yt-dlp download error" in lower:
+            return (
+                "Audio download failed (yt-dlp error). This is often a temporary "
+                "network/YouTube issue. Try again later."
+            )
+
+        if "connection error" in lower or "connection aborted" in lower or "timed out" in lower:
+            return "Network error while contacting Spotify/YouTube. Please check your connection and try again."
+
+        # Fallback: trim long stack traces
+        if len(text) > 500:
+            return text[:500] + "..."
+        return text
+
+    def _is_retryable_error(self, message: Optional[str]) -> bool:
+        """Return True if the error looks transient and worth retrying."""
+        if not message:
+            return False
+
+        lower = message.lower()
+
+        # Rate limiting is usually long-lived (hours), so don't hammer Spotify with retries
+        if "429" in lower or "rate-limit" in lower or "rate/request limit" in lower:
+            return False
+
+        # Network-ish errors are typically retryable
+        retry_keywords = [
+            "network error",
+            "timed out",
+            "temporarily unavailable",
+            "connection aborted",
+            "connection reset",
+            "yt-dlp download error",
+            "audio providererror",
+        ]
+
+        return any(key in lower for key in retry_keywords)

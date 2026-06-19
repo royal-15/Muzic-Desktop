@@ -1,7 +1,8 @@
 """Configuration management with JSON persistence."""
 import json
+import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from dataclasses import dataclass, field, asdict
 
 from .constants import (
@@ -11,6 +12,7 @@ from .constants import (
     DEFAULT_QUALITY,
     DEFAULT_FORMAT,
     DEFAULT_THEME,
+    ENV_FILE,
 )
 
 
@@ -39,6 +41,12 @@ class AppSettings:
     yt_dlp_path: str = field(default="yt-dlp")
     spotdl_path: str = field(default="spotdl")
     ffmpeg_path: str = field(default="ffmpeg")
+
+    # Spotify API credentials (optional)
+    # Used by spotdl/Spotify API to reduce rate limiting.
+    spotify_client_id: str = field(default="")
+    spotify_client_secret: str = field(default="")
+    spotify_credentials_configured: bool = field(default=False)
     
     # UI preferences
     window_width: int = field(default=1000)
@@ -58,19 +66,25 @@ class AppSettings:
     
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "AppSettings":
-        """Load settings from JSON file."""
+        """Load settings from JSON file and merge in environment-based overrides."""
         config_path = path or CONFIG_FILE
         
         if not config_path.exists():
-            return cls()
+            settings = cls()
+            settings._load_spotify_from_env()
+            return settings
         
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return cls(**data)
+            settings = cls(**data)
         except (json.JSONDecodeError, TypeError, ValueError):
             # Return defaults if config is corrupted
-            return cls()
+            settings = cls()
+        
+        # Merge Spotify credentials from .env / environment
+        settings._load_spotify_from_env()
+        return settings
     
     def save(self, path: Optional[Path] = None) -> bool:
         """Save settings to JSON file."""
@@ -124,6 +138,94 @@ class AppSettings:
         defaults = AppSettings()
         for key, value in asdict(defaults).items():
             setattr(self, key, value)
+
+    # ----- Internal helpers for Spotify credentials -----
+
+    def _load_spotify_from_env(self) -> None:
+        """Populate Spotify credentials from .env / environment if available.
+
+        This keeps sensitive values out of the JSON config while still exposing
+        them via the settings object.
+        """
+        env_vars = _read_env_file()
+
+        # Prefer explicit SPOTIPY_* env vars, then fall back to .env entries
+        client_id = os.getenv("SPOTIPY_CLIENT_ID") or env_vars.get("SPOTIPY_CLIENT_ID", "")
+        client_secret = os.getenv("SPOTIPY_CLIENT_SECRET") or env_vars.get("SPOTIPY_CLIENT_SECRET", "")
+
+        if client_id and client_secret:
+            self.spotify_client_id = client_id
+            self.spotify_client_secret = client_secret
+            self.spotify_credentials_configured = True
+
+            # Ensure process environment has them set for any child processes
+            os.environ["SPOTIPY_CLIENT_ID"] = client_id
+            os.environ["SPOTIPY_CLIENT_SECRET"] = client_secret
+
+
+def _read_env_file() -> Dict[str, str]:
+    """Read key=value pairs from the local .env file.
+
+    Very small helper so we don't need an external dependency like python-dotenv.
+    """
+    env_data: Dict[str, str] = {}
+
+    if not ENV_FILE.exists():
+        return env_data
+
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    env_data[key] = value
+    except OSError:
+        # Ignore env read failures and just return what we have
+        return env_data
+
+    return env_data
+
+
+def save_spotify_credentials_to_env(client_id: str, client_secret: str) -> None:
+    """Persist Spotify client ID/secret to .env and update process env.
+
+    The .env file is already ignored by git (.gitignore), so credentials stay
+    local to the machine.
+    """
+    client_id = (client_id or "").strip()
+    client_secret = (client_secret or "").strip()
+
+    # Load current env file content so we don't clobber unrelated keys
+    env_data = _read_env_file()
+
+    if client_id and client_secret:
+        env_data["SPOTIPY_CLIENT_ID"] = client_id
+        env_data["SPOTIPY_CLIENT_SECRET"] = client_secret
+    else:
+        # If either is empty, remove both to avoid half-configured state
+        env_data.pop("SPOTIPY_CLIENT_ID", None)
+        env_data.pop("SPOTIPY_CLIENT_SECRET", None)
+
+    try:
+        lines = [f"{key}={value}\n" for key, value in env_data.items()]
+        with open(ENV_FILE, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except OSError:
+        # Fail silently; worst case spotdl just won't see credentials
+        return
+
+    # Reflect in current process env so new downloads see updated values
+    if client_id and client_secret:
+        os.environ["SPOTIPY_CLIENT_ID"] = client_id
+        os.environ["SPOTIPY_CLIENT_SECRET"] = client_secret
+    else:
+        os.environ.pop("SPOTIPY_CLIENT_ID", None)
+        os.environ.pop("SPOTIPY_CLIENT_SECRET", None)
 
 
 class SettingsManager:

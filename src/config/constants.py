@@ -21,6 +21,8 @@ else:
 CONFIG_FILE = APP_DIR / "config.json"
 HISTORY_FILE = APP_DIR / "history.json"
 LOG_FILE = APP_DIR / "spotiplay.log"
+# Environment file (not committed to git; see .gitignore)
+ENV_FILE = APP_DIR / ".env"
 
 # Resource paths
 RESOURCES_DIR = BASE_DIR / "resources"
