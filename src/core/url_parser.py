@@ -3,21 +3,21 @@ import re
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
-from ..utils.validators import is_spotify_url, is_youtube_url
+from ..utils.validators import is_youtube_url
 
 
 @dataclass
 class URLInfo:
     """Information extracted from a URL."""
     url: str
-    source: str  # 'spotify' or 'youtube'
-    type: str  # 'track', 'album', 'playlist', 'video', 'channel'
+    source: str  # 'youtube'
+    type: str  # 'playlist', 'video', 'channel'
     id: Optional[str] = None
     title: Optional[str] = None
 
 
 class URLParser:
-    """Parse and extract information from Spotify and YouTube URLs."""
+    """Parse and extract information from YouTube URLs."""
     
     @staticmethod
     def parse(url: str) -> Optional[URLInfo]:
@@ -25,49 +25,14 @@ class URLParser:
         Parse URL and extract information.
         
         Args:
-            url: Spotify or YouTube URL
+            url: YouTube URL
         
         Returns:
             URLInfo object or None if parsing fails
         """
-        if is_spotify_url(url):
-            return URLParser._parse_spotify(url)
-        elif is_youtube_url(url):
+        if is_youtube_url(url):
             return URLParser._parse_youtube(url)
         return None
-    
-    @staticmethod
-    def _parse_spotify(url: str) -> Optional[URLInfo]:
-        """Parse Spotify URL."""
-        # Spotify URL patterns:
-        # https://open.spotify.com/track/ID
-        # https://open.spotify.com/album/ID
-        # https://open.spotify.com/playlist/ID
-        # spotify:track:ID
-        
-        patterns = {
-            'track': r'(?:open\.spotify\.com/track/|spotify:track:)([a-zA-Z0-9]+)',
-            'album': r'(?:open\.spotify\.com/album/|spotify:album:)([a-zA-Z0-9]+)',
-            'playlist': r'(?:open\.spotify\.com/playlist/|spotify:playlist:)([a-zA-Z0-9]+)',
-        }
-        
-        for url_type, pattern in patterns.items():
-            match = re.search(pattern, url)
-            if match:
-                return URLInfo(
-                    url=url,
-                    source='spotify',
-                    type=url_type,
-                    id=match.group(1)
-                )
-        
-        # If no specific match, treat as generic Spotify URL
-        return URLInfo(
-            url=url,
-            source='spotify',
-            type='unknown',
-            id=None
-        )
     
     @staticmethod
     def _parse_youtube(url: str) -> Optional[URLInfo]:
@@ -134,7 +99,7 @@ class URLParser:
         """Check if URL points to a playlist/album."""
         info = URLParser.parse(url)
         if info:
-            return info.type in ['playlist', 'album']
+            return info.type == 'playlist'
         return False
     
     @staticmethod
@@ -144,7 +109,7 @@ class URLParser:
         if not info:
             return url[:50] + "..." if len(url) > 50 else url
         
-        # Format: "Spotify Track" or "YouTube Video"
+        # Format: "YouTube Video"
         source_name = info.source.capitalize()
         type_name = info.type.capitalize()
         

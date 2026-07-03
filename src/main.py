@@ -1,4 +1,4 @@
-"""SpotiPlay - Modern Music Downloader
+"""Muzic - Modern Music Downloader
 Main application entry point.
 """
 import sys
@@ -21,7 +21,7 @@ def main() -> int:
         # Create application
         app = QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
-        app.setOrganizationName("SpotiPlay")
+        app.setOrganizationName("Muzic")
         
         # Create and show main window
         window = MainWindow()

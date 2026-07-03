@@ -3,9 +3,9 @@ from pathlib import Path
 import sys
 
 # Application info
-APP_NAME = "SpotiPlay"
+APP_NAME = "Muzic"
 APP_VERSION = "2.0.0"
-APP_AUTHOR = "SpotiPlay Team"
+APP_AUTHOR = "Muzic Team"
 APP_DESCRIPTION = "Modern Music Downloader"
 
 # File paths
@@ -20,9 +20,7 @@ else:
 
 CONFIG_FILE = APP_DIR / "config.json"
 HISTORY_FILE = APP_DIR / "history.json"
-LOG_FILE = APP_DIR / "spotiplay.log"
-# Environment file (not committed to git; see .gitignore)
-ENV_FILE = APP_DIR / ".env"
+LOG_FILE = APP_DIR / "muzic.log"
 
 # Resource paths
 RESOURCES_DIR = BASE_DIR / "resources"
@@ -30,7 +28,7 @@ ICONS_DIR = RESOURCES_DIR / "icons"
 LOGO_PATH = RESOURCES_DIR / "logo.ico"
 
 # Default settings
-DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "SpotiPlay")
+DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "Muzic")
 DEFAULT_MAX_PARALLEL = 3
 DEFAULT_QUALITY = "320kbps"
 DEFAULT_FORMAT = "mp3"
@@ -58,7 +56,7 @@ WINDOW_DEFAULT_HEIGHT = 700
 
 # Color palette (Dark theme)
 COLORS_DARK = {
-    "primary": "#1DB954",
+    "primary": "#14B8A6",
     "background": "#121212",
     "surface": "#1E1E1E",
     "card": "#282828",
@@ -66,7 +64,7 @@ COLORS_DARK = {
     "text_primary": "#FFFFFF",
     "text_secondary": "#B3B3B3",
     "text_disabled": "#666666",
-    "success": "#1DB954",
+    "success": "#22C55E",
     "warning": "#FFA726",
     "error": "#EF5350",
     "info": "#42A5F5",
@@ -76,7 +74,7 @@ COLORS_DARK = {
 
 # Color palette (Light theme)
 COLORS_LIGHT = {
-    "primary": "#1DB954",
+    "primary": "#0D9488",
     "background": "#FFFFFF",
     "surface": "#F5F5F5",
     "card": "#FFFFFF",
@@ -84,7 +82,7 @@ COLORS_LIGHT = {
     "text_primary": "#000000",
     "text_secondary": "#666666",
     "text_disabled": "#AAAAAA",
-    "success": "#1DB954",
+    "success": "#16A34A",
     "warning": "#FF9800",
     "error": "#F44336",
     "info": "#2196F3",
@@ -110,12 +108,6 @@ ANIMATION_FAST = 150
 ANIMATION_MEDIUM = 300
 ANIMATION_SLOW = 500
 
-# URL patterns
-SPOTIFY_PATTERNS = [
-    r"^https?://open\.spotify\.com/",
-    r"^spotify:",
-]
-
 YOUTUBE_PATTERNS = [
-    r"^https?://(www\.)?(youtube\.com|youtu\.be)/",
+    r"^https?://((www|m|music)\.)?(youtube\.com|youtu\.be)/",
 ]

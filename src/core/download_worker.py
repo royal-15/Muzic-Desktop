@@ -11,7 +11,6 @@ from PySide6.QtCore import QThread, Signal
 from ..config.settings import AppSettings
 from ..config.constants import STATUS_DOWNLOADING, STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED
 from ..utils.logger import logger
-from ..utils.validators import is_spotify_url
 
 
 @dataclass
@@ -28,7 +27,7 @@ class DownloadTask:
 
 
 class DownloadWorker(QThread):
-    """Worker thread for downloading music from Spotify or YouTube."""
+    """Worker thread for downloading audio with yt-dlp."""
     
     # Signals
     progress_updated = Signal(int, str, str)  # progress, speed, eta
@@ -61,17 +60,12 @@ class DownloadWorker(QThread):
             # Ensure output directory exists
             os.makedirs(self.settings.output_dir, exist_ok=True)
             
-            # Build command based on URL type or search query
-            if is_spotify_url(self.task.url):
-                cmd = self._build_spotify_command()
-            elif self._is_youtube_search(self.task.url):
-                cmd = self._build_youtube_command()
-            elif self.task.url.startswith("ytsearch"):
-                # yt-dlp search query
+            # Build command for YouTube URL, playlist, or search query.
+            if self._is_youtube_search(self.task.url):
                 cmd = self._build_youtube_command()
             else:
-                # Assume it's a Spotify search query (song name)
-                cmd = self._build_spotify_command()
+                self.task.url = f"ytsearch1:{self.task.url}"
+                cmd = self._build_youtube_command()
             
             logger.debug(f"Command: {' '.join(cmd)}")
             
@@ -126,28 +120,8 @@ class DownloadWorker(QThread):
             logger.exception(f"Exception in download task {self.task.id}")
             self.finished.emit(STATUS_FAILED, "", str(e))
     
-    def _build_spotify_command(self) -> list[str]:
-        """Build command for Spotify download using spotdl."""
-        cmd = [
-            self.settings.spotdl_path,
-            "download",
-            self.task.url,
-            "--output", self.settings.output_dir,
-        ]
-        
-        # Add format if not mp3 (mp3 is default)
-        if self.settings.default_format.lower() != "mp3":
-            cmd.extend(["--format", self.settings.default_format])
-        
-        # Add bitrate if not "Best"
-        if self.settings.default_quality != "Best":
-            bitrate = self.settings.default_quality.replace("kbps", "k")
-            cmd.extend(["--bitrate", bitrate])
-        
-        return cmd
-    
     def _build_youtube_command(self) -> list[str]:
-        """Build command for YouTube download using yt-dlp."""
+        """Build command for audio download using yt-dlp."""
         output_template = os.path.join(
             self.settings.output_dir,
             "%(title)s.%(ext)s"
@@ -160,6 +134,9 @@ class DownloadWorker(QThread):
             "--audio-format", self.settings.default_format,
             "-o", output_template,
         ]
+
+        if self.settings.ffmpeg_path:
+            cmd.extend(["--ffmpeg-location", self.settings.ffmpeg_path])
         
         # Add quality settings
         if self.settings.default_quality == "Best":
@@ -193,14 +170,6 @@ class DownloadWorker(QThread):
             (success, output_file, error_message)
         """
         try:
-            # Prepare environment for subprocess so spotdl sees Spotify credentials
-            env = os.environ.copy()
-            client_id = getattr(self.settings, "spotify_client_id", "")
-            client_secret = getattr(self.settings, "spotify_client_secret", "")
-            if client_id and client_secret:
-                env["SPOTIPY_CLIENT_ID"] = client_id
-                env["SPOTIPY_CLIENT_SECRET"] = client_secret
-
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -208,7 +177,6 @@ class DownloadWorker(QThread):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=env,
             )
         except FileNotFoundError:
             return (False, None, f"Command not found: {cmd[0]}")
@@ -239,7 +207,7 @@ class DownloadWorker(QThread):
                 if self._process.poll() is None:
                     self._process.terminate()
                 msg = f"Download timed out after {timeout_seconds} seconds"
-                output_lines.append(f"SpotiPlay: {msg}\n")
+                output_lines.append(f"Muzic: {msg}\n")
                 return (False, output_file, msg)
             
             line = self._process.stdout.readline() if self._process.stdout else ""
@@ -263,11 +231,6 @@ class DownloadWorker(QThread):
                 file_match = re.search(r'\[download\] Destination: (.+)', line)
                 if file_match:
                     output_file = file_match.group(1).strip()
-                else:
-                    # spotdl format
-                    file_match = re.search(r'Downloaded "(.+)"', line)
-                    if file_match:
-                        output_file = file_match.group(1).strip()
         
         returncode = self._process.poll()
         
@@ -308,45 +271,27 @@ class DownloadWorker(QThread):
             except ValueError:
                 pass
         
-        # spotdl progress (less detailed)
-        if "Downloading" in line and current < 50:
-            return (50, "", "")
-        if "Converting" in line and current < 80:
-            return (80, "", "")
-        if "Downloaded" in line and current < 100:
-            return (100, "", "")
-        
         return (current, "", "")
     
     def _classify_error_message(self, raw_error: str) -> str:
-        """Map low-level errors from spotdl/Spotify into a user-friendly message.
-
-        This keeps messages short for the UI and highlights common Spotify issues
-        like rate limits (HTTP 429).
-        """
+        """Map low-level yt-dlp/ffmpeg errors into a user-friendly message."""
         text = (raw_error or "").strip()
         if not text:
             return "Download failed"
 
         lower = text.lower()
 
-        # Spotify rate limiting / HTTP 429
-        if "429 error responses" in lower or "rate/request limit" in lower or "max retries reached" in lower:
-            return (
-                "Spotify is rate-limiting your account (HTTP 429). "
-                "Please wait a while (up to 24 hours) and reduce parallel downloads "
-                "or the number of playlists you download at once."
-            )
-
-        # Generic network / provider errors
-        if "audio providererror" in lower or "yt-dlp download error" in lower:
+        if "yt-dlp download error" in lower:
             return (
                 "Audio download failed (yt-dlp error). This is often a temporary "
-                "network/YouTube issue. Try again later."
+                "network or YouTube issue. Try again later."
             )
 
         if "connection error" in lower or "connection aborted" in lower or "timed out" in lower:
-            return "Network error while contacting Spotify/YouTube. Please check your connection and try again."
+            return "Network error while contacting YouTube. Please check your connection and try again."
+
+        if "ffmpeg" in lower and ("not found" in lower or "no such file" in lower):
+            return "FFmpeg was not found. Check the FFmpeg path in Settings."
 
         # Fallback: trim long stack traces
         if len(text) > 500:
@@ -360,10 +305,6 @@ class DownloadWorker(QThread):
 
         lower = message.lower()
 
-        # Rate limiting is usually long-lived (hours), so don't hammer Spotify with retries
-        if "429" in lower or "rate-limit" in lower or "rate/request limit" in lower:
-            return False
-
         # Network-ish errors are typically retryable
         retry_keywords = [
             "network error",
@@ -372,7 +313,6 @@ class DownloadWorker(QThread):
             "connection aborted",
             "connection reset",
             "yt-dlp download error",
-            "audio providererror",
         ]
 
         return any(key in lower for key in retry_keywords)

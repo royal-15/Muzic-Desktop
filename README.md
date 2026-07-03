@@ -1,170 +1,103 @@
-# SpotiPlay v2.0 - Modern Music Downloader
+# Muzic v2.0 - Modern Music Downloader
 
-A completely redesigned desktop application for downloading music from Spotify and YouTube. Built with PySide6 (Qt6), SpotiPlay v2.0 features a modern Material Design-inspired interface, advanced queue management, and professional-grade download capabilities.
+Muzic is a PySide6 desktop app for downloading audio from YouTube videos, YouTube playlists, and YouTube search results. It uses `yt-dlp` for downloads and FFmpeg for audio extraction/conversion.
 
-## ✨ Key Features
+## Key Features
 
-### Download Management
--   🎵 **Multi-source Support**: Download from Spotify (tracks, albums, playlists) and YouTube (videos, playlists)
--   📋 **Queue System**: Add multiple downloads and manage them efficiently
--   ⚡ **Parallel Downloads**: Configure up to 10 simultaneous downloads
--   📊 **Real-time Progress**: See download progress, speed, and ETA for each task
--   🔄 **Smart Auto-start**: Downloads begin automatically when added to queue
+- **YouTube audio downloads**: Download from videos, playlists, or song-name searches.
+- **Batch text input**: Use `From .txt` mode to queue one YouTube URL or song name per line.
+- **Queue system**: Add multiple downloads and let the app run them automatically.
+- **Parallel downloads**: Configure up to 10 simultaneous downloads.
+- **Progress tracking**: View progress, speed, and ETA for each task.
+- **Quality and format controls**: Choose quality presets and MP3, M4A, FLAC, or WAV output.
+- **Configurable tools**: Set custom paths for `yt-dlp` and FFmpeg.
 
-### Modern Interface
--   🎨 **Material Design**: Clean, modern interface with Spotify green accents
--   🌙 **Dark Theme**: Eye-friendly dark theme by default
--   🪟 **Responsive Layout**: Resizable window (minimum 900x600)
--   📢 **Toast Notifications**: Non-intrusive notifications for important events
--   📈 **Live Statistics**: Track total, downloading, completed, and failed downloads
-
-### Quality & Format Options
--   🎚️ **Quality Presets**: Best, 320kbps, 256kbps, 192kbps, 128kbps
--   🎼 **Format Selection**: MP3, M4A, FLAC, WAV
--   🖼️ **Metadata Embedding**: Automatic title, artist, album, and cover art
--   ⚙️ **Configurable Tools**: Custom paths for yt-dlp, spotdl, and FFmpeg
-
-## 🚀 Installation
+## Installation
 
 ### Prerequisites
 
--   **Python 3.10 or later**
--   **yt-dlp**: YouTube downloader (`pip install yt-dlp` or download from [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases))
--   **spotdl**: Spotify downloader (`pip install spotdl`)
--   **FFmpeg**: Audio processing (download from [ffmpeg.org](https://ffmpeg.org/download.html))
+- Python 3.12
+- `yt-dlp`
+- FFmpeg
 
 ### Quick Start
 
-1. **Clone or download the repository:**
 ```bash
-git clone https://github.com/yourusername/SpotiPlay-Desktop.git
-cd SpotiPlay-Desktop
-```
-
-2. **Install Python dependencies:**
-```bash
+git clone https://github.com/yourusername/Muzic-Desktop.git
+cd Muzic-Desktop
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-```
-
-3. **Install download tools:**
-```bash
-# Install yt-dlp and spotdl
-pip install yt-dlp spotdl
-
-# FFmpeg (Windows): Download from ffmpeg.org and add to PATH
-# Or place ffmpeg.exe in the project directory
-```
-
-4. **Run the application:**
-```bash
 python run.py
 ```
 
-## 💻 Usage
+Install external tools if they are not already available on `PATH`:
 
-1. **Launch the application**
-   ```bash
-   python run.py
-   ```
-
-2. **Configure settings** (first time)
-   - Accept the disclaimer
-   - Select your preferred output directory
-   - Choose default quality and format
-
-3. **Add downloads**
-   - Paste a Spotify or YouTube URL in the input field
-   - Or paste multiple URLs (separated by newlines)
-   - Click "Add to Queue" or press Enter
-
-4. **Manage queue**
-   - Downloads start automatically
-   - Monitor progress in real-time
-   - Use "Cancel All" to stop downloads
-   - Use "Clear Completed" to clean up the queue
-
-5. **Access settings**
-   - Click the "⚙ Settings" button
-   - Configure parallel downloads (1-10)
-   - Set custom tool paths if needed
-
-### Supported URLs
-
-**Spotify:**
-- Individual tracks: `https://open.spotify.com/track/...`
-- Albums: `https://open.spotify.com/album/...`
-- Playlists: `https://open.spotify.com/playlist/...`
-
-**YouTube:**
-- Videos: `https://www.youtube.com/watch?v=...`
-- Short links: `https://youtu.be/...`
-- Playlists: `https://www.youtube.com/playlist?list=...`
-
-## 🏗️ Project Structure
-
+```bash
+pip install yt-dlp
 ```
-SpotiPlay-Desktop/
+
+Download FFmpeg from https://ffmpeg.org/download.html or configure its path in Settings.
+
+## Usage
+
+1. Launch the app with `python run.py`.
+2. Choose an input mode:
+   - `Auto`: accepts YouTube URLs or searches YouTube for plain text.
+   - `YouTube URL`: accepts only YouTube video or playlist URLs.
+   - `Search on YouTube`: treats input as a song-name search.
+   - `From .txt`: reads one YouTube URL or song name per non-empty line from a text file.
+3. Select output directory, quality, and format.
+4. Click `Add to Queue`.
+
+Downloads start automatically and respect the configured max parallel download limit.
+
+## Supported Input
+
+- YouTube videos: `https://www.youtube.com/watch?v=...`
+- YouTube short links: `https://youtu.be/...`
+- YouTube playlists: `https://www.youtube.com/playlist?list=...`
+- Song names: `Imagine Dragons Believer`
+- `.txt` batch files with one URL or search name per line
+
+## Project Structure
+
+```text
+Muzic-Desktop/
 ├── src/
-│   ├── config/              # Configuration and constants
-│   │   ├── constants.py
-│   │   └── settings.py
-│   ├── core/                # Download engine
-│   │   ├── download_manager.py
-│   │   ├── download_worker.py
-│   │   └── url_parser.py
-│   ├── ui/                  # User interface
-│   │   ├── components/
-│   │   │   └── toast.py
-│   │   ├── styles/
-│   │   │   └── theme.py
-│   │   └── main_window.py
-│   ├── utils/               # Utilities
-│   │   ├── logger.py
-│   │   └── validators.py
-│   └── main.py              # Entry point
-├── resources/               # Icons and assets
+│   ├── config/
+│   ├── core/
+│   ├── ui/
+│   └── utils/
 ├── requirements.txt
-├── run.py                   # Launcher script
+├── run.py
 └── README.md
 ```
 
-## 🚀 Tech Stack
-
-- **Framework**: [PySide6](https://doc.qt.io/qtforpython-6/) (Qt6 for Python)
-- **Download Tools**: [yt-dlp](https://github.com/yt-dlp/yt-dlp), [spotdl](https://github.com/spotDL/spotify-downloader)
-- **Audio Processing**: [FFmpeg](https://ffmpeg.org/)
-- **Metadata**: [Mutagen](https://mutagen.readthedocs.io/)
-
-## 👏 Acknowledgments
-
--   [PySide6](https://doc.qt.io/qtforpython-6/) for the modern, native-looking UI framework
--   [spotdl](https://github.com/spotDL/spotify-downloader) for Spotify download functionality
--   [yt-dlp](https://github.com/yt-dlp/yt-dlp) for YouTube download functionality
--   [FFmpeg](https://ffmpeg.org/) for audio conversion and processing
-
-## 📦 Building Executable
-
-To create a standalone executable:
+## Building Executable
 
 ```bash
 pip install pyinstaller
-pyinstaller --name="SpotiPlay" --windowed --onefile \
+pyinstaller Muzic.spec
+```
+
+Or manually:
+
+```bash
+pyinstaller --name="Muzic" --windowed --onefile \
             --add-data="src:src" \
             --add-data="resources:resources" \
             --hidden-import=PySide6 \
             run.py
 ```
 
-## ⚠️ Disclaimer
+## Disclaimer
 
-This application is for **educational purposes only**. Users are responsible for ensuring they have the legal right to download any content. Downloading copyrighted material without permission may violate copyright laws and terms of service.
+This application is for educational purposes only. Users are responsible for ensuring they have the legal right to download any content. Downloading copyrighted material without permission may violate copyright laws and terms of service.
 
-## 📝 License
+## License
 
 This project is provided as-is for educational purposes.
 
----
-
 **Version**: 2.0.0  
-**Author**: SpotiPlay Team  
-**Built with** ❤️ **using Python and Qt**
+**Author**: Muzic Team

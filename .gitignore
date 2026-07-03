@@ -15,7 +15,7 @@ build/
 develop-eggs/
 dist/*
 !dist/installers/
-!dist/SpotiPlay.iss
+!dist/Muzic.iss
 downloads/
 eggs/
 .eggs/
@@ -36,6 +36,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!Muzic.spec
 
 # Installer logs
 pip-log.txt

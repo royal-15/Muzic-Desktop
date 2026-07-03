@@ -2,7 +2,7 @@
 import re
 from pathlib import Path
 from typing import Tuple
-from ..config.constants import SPOTIFY_PATTERNS, YOUTUBE_PATTERNS
+from ..config.constants import YOUTUBE_PATTERNS
 
 
 def is_valid_url(url: str) -> bool:
@@ -21,17 +21,6 @@ def is_valid_url(url: str) -> bool:
     return bool(url_pattern.match(url))
 
 
-def is_spotify_url(url: str) -> bool:
-    """Check if URL is a Spotify URL."""
-    if not url:
-        return False
-    
-    for pattern in SPOTIFY_PATTERNS:
-        if re.match(pattern, url, re.IGNORECASE):
-            return True
-    return False
-
-
 def is_youtube_url(url: str) -> bool:
     """Check if URL is a YouTube URL."""
     if not url:
@@ -48,11 +37,9 @@ def detect_url_type(url: str) -> str:
     Detect the type of URL.
     
     Returns:
-        'spotify', 'youtube', 'unknown'
+        'youtube', 'unknown'
     """
-    if is_spotify_url(url):
-        return 'spotify'
-    elif is_youtube_url(url):
+    if is_youtube_url(url):
         return 'youtube'
     return 'unknown'
 
@@ -78,7 +65,7 @@ def is_valid_directory(path: str) -> Tuple[bool, str]:
         dir_path.mkdir(parents=True, exist_ok=True)
         
         # Check if we have write permissions
-        test_file = dir_path / ".spotiplay_test"
+        test_file = dir_path / ".muzic_test"
         try:
             test_file.touch()
             test_file.unlink()
@@ -158,7 +145,7 @@ def parse_multiple_urls(text: str) -> list[str]:
     
     for url in urls:
         url = url.strip()
-        if url and url not in seen and (is_spotify_url(url) or is_youtube_url(url)):
+        if url and url not in seen and is_youtube_url(url):
             seen.add(url)
             valid_urls.append(url)
     

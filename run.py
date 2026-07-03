@@ -1,5 +1,5 @@
 """
-SpotiPlay Launcher
+Muzic Launcher
 Run this script to start the application.
 """
 import sys

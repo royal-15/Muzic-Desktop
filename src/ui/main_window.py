@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QCloseEvent
 
-from ..config.settings import SettingsManager, save_spotify_credentials_to_env
+from ..config.settings import SettingsManager
 from ..config.constants import (
     APP_NAME, APP_VERSION, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT,
     WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT,
@@ -23,7 +23,7 @@ from ..config.constants import (
 )
 from ..core.download_manager import DownloadManager
 from ..core.download_worker import DownloadTask
-from ..utils.validators import parse_multiple_urls, is_valid_directory, is_spotify_url, is_youtube_url
+from ..utils.validators import parse_multiple_urls, is_valid_directory, is_valid_url, is_youtube_url
 from ..utils.logger import logger
 from .styles.theme import Theme
 from .components.toast import Toast
@@ -55,10 +55,6 @@ class MainWindow(QMainWindow):
         if self.settings.first_run:
             self._show_disclaimer()
 
-        # Suggest configuring Spotify API credentials if missing
-        if not getattr(self.settings, "spotify_credentials_configured", False):
-            self._maybe_show_spotify_credentials_dialog()
-        
         logger.info(f"{APP_NAME} v{APP_VERSION} started")
     
     def _setup_window(self) -> None:
@@ -95,15 +91,20 @@ class MainWindow(QMainWindow):
         self.url_input.setPlaceholderText("Paste URL or enter song name...")
         self.url_input.returnPressed.connect(self._on_add_clicked)
         input_layout.addWidget(self.url_input, 3)
+
+        self.input_file_button = QPushButton("Browse .txt")
+        self.input_file_button.setObjectName("secondaryButton")
+        self.input_file_button.clicked.connect(self._on_browse_input_file_clicked)
+        self.input_file_button.setVisible(False)
+        input_layout.addWidget(self.input_file_button)
         
         # Query type selector
         self.mode_combo = QComboBox()
         self.mode_combo.addItems([
             "Auto",
-            "Spotify URL/Search",
             "YouTube URL",
             "Search on YouTube",
-            "Search on Spotify"
+            "From .txt",
         ])
         self.mode_combo.setCurrentIndex(0)
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
@@ -256,9 +257,13 @@ class MainWindow(QMainWindow):
     def _on_add_clicked(self) -> None:
         """Handle add button click."""
         query_text = self.url_input.text().strip()
+        mode = self.mode_combo.currentText()
         
         if not query_text:
-            Toast.show_message(self, "Please enter a URL or search query", "warning")
+            if mode == "From .txt":
+                Toast.show_message(self, "Please select a .txt file", "warning")
+            else:
+                Toast.show_message(self, "Please enter a URL or search query", "warning")
             return
         
         # Update settings
@@ -266,7 +271,6 @@ class MainWindow(QMainWindow):
         self.settings_manager.save()
         
         # Process query based on mode
-        mode = self.mode_combo.currentText()
         queries = self._process_query(query_text, mode)
         
         if not queries:
@@ -283,8 +287,9 @@ class MainWindow(QMainWindow):
     
     def _process_query(self, text: str, mode: str) -> list[str]:
         """Process input text based on selected mode."""
-        queries = []
-        
+        if mode == "From .txt":
+            return self._process_txt_file(text)
+
         # Try to parse as multiple URLs first
         urls = parse_multiple_urls(text)
         
@@ -297,12 +302,6 @@ class MainWindow(QMainWindow):
             
             if mode == "Auto":
                 return [url]
-            elif mode == "Spotify URL/Search":
-                if is_spotify_url(url):
-                    return [url]
-                else:
-                    # Treat as search query
-                    return [text]
             elif mode == "YouTube URL":
                 if is_youtube_url(url):
                     return [url]
@@ -311,44 +310,82 @@ class MainWindow(QMainWindow):
             elif mode == "Search on YouTube":
                 # Use yt-dlp search syntax
                 return [f"ytsearch1:{text}"]
-            elif mode == "Search on Spotify":
-                # Use spotdl search (just pass the text)
-                return [text]
         else:
+            if is_valid_url(text):
+                Toast.show_message(self, "Only YouTube URLs are supported", "error", 3000)
+                return []
+
             # No valid URLs, treat as search query
             if mode == "Auto" or mode == "Search on YouTube":
                 # Default to YouTube search
                 return [f"ytsearch1:{text}"]
-            elif mode == "Spotify URL/Search" or mode == "Search on Spotify":
-                # Spotify search
-                return [text]
             elif mode == "YouTube URL":
                 # Must be a URL in this mode
                 return []
         
         return []
 
-    def _extract_spotify_playlist_id(self, url: str) -> str | None:
-        """Extract Spotify playlist ID from a URL, ignoring query params.
+    def _process_txt_file(self, file_path: str) -> list[str]:
+        """Read a .txt batch file and convert each line to a download query."""
+        path = Path(file_path).expanduser()
 
-        Returns the playlist ID (the part after `/playlist/`) or None if not a playlist URL.
+        if path.suffix.lower() != ".txt":
+            Toast.show_message(self, "Please select a .txt file", "error", 3000)
+            return []
+
+        if not path.is_file():
+            Toast.show_message(self, "Text file not found", "error", 3000)
+            return []
+
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            Toast.show_message(self, f"Could not read file: {e}", "error", 4000)
+            return []
+
+        queries = []
+        seen = set()
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line in seen:
+                continue
+
+            if is_youtube_url(line):
+                query = line
+            elif is_valid_url(line):
+                continue
+            else:
+                query = f"ytsearch1:{line}"
+
+            seen.add(line)
+            queries.append(query)
+
+        if not queries:
+            Toast.show_message(self, "No YouTube URLs or search names found in file", "error", 4000)
+
+        return queries
+
+    def _extract_youtube_playlist_id(self, url: str) -> str | None:
+        """Extract YouTube playlist ID from a URL, ignoring unrelated params.
+
+        Returns the playlist ID from the `list` query parameter, or None.
         """
-        marker = "open.spotify.com/playlist/"
-        idx = url.find(marker)
-        if idx == -1:
+        if not is_youtube_url(url):
             return None
-        start = idx + len(marker)
-        end = url.find("?", start)
-        if end == -1:
-            end = len(url)
-        playlist_id = url[start:end].strip()
-        return playlist_id or None
+
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(url)
+        values = parse_qs(parsed.query).get("list", [])
+        if not values:
+            return None
+        return values[0].strip() or None
 
     def _get_saved_playlist_name_for_url(self, url: str) -> str | None:
-        """Return saved playlist name that matches the given Spotify playlist URL.
+        """Return saved playlist name that matches the given YouTube playlist URL.
 
-        This uses the `playlist_urls` mapping from settings and matches by playlist ID,
-        so it still works even if the `si` query parameter differs.
+        This uses the `playlist_urls` mapping from settings and matches by playlist ID.
         """
         if not url:
             return None
@@ -356,12 +393,12 @@ class MainWindow(QMainWindow):
         if not hasattr(self.settings, "playlist_urls") or not self.settings.playlist_urls:
             return None
 
-        target_id = self._extract_spotify_playlist_id(url)
+        target_id = self._extract_youtube_playlist_id(url)
         if not target_id:
             return None
 
         for name, saved_url in self.settings.playlist_urls.items():
-            saved_id = self._extract_spotify_playlist_id(saved_url or "")
+            saved_id = self._extract_youtube_playlist_id(saved_url or "")
             if saved_id and saved_id.lower() == target_id.lower():
                 return name
 
@@ -391,12 +428,24 @@ class MainWindow(QMainWindow):
         # Update placeholder text based on mode
         placeholders = {
             "Auto": "Paste URL or enter song name...",
-            "Spotify URL/Search": "Paste Spotify URL or search for songs...",
             "YouTube URL": "Paste YouTube URL...",
             "Search on YouTube": "Search for songs on YouTube...",
-            "Search on Spotify": "Search for songs on Spotify..."
+            "From .txt": "Select a .txt file with one YouTube URL or song name per line...",
         }
         self.url_input.setPlaceholderText(placeholders.get(mode, "Paste URL or enter song name..."))
+        self.input_file_button.setVisible(mode == "From .txt")
+
+    def _on_browse_input_file_clicked(self) -> None:
+        """Select a .txt file for batch input."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Text File",
+            str(Path.home()),
+            "Text files (*.txt)",
+        )
+
+        if file_path:
+            self.url_input.setText(file_path)
     
     def _on_quality_changed(self, quality: str) -> None:
         """Handle quality change."""
@@ -665,59 +714,6 @@ class MainWindow(QMainWindow):
         status_text = f"Total: {stats['total']} | Downloading: {stats['downloading']} | Completed: {stats['completed']} | Failed: {stats['failed']}"
         self.statusBar().showMessage(status_text)
     
-    def _maybe_show_spotify_credentials_dialog(self) -> None:
-        """Prompt user to enter Spotify API credentials to reduce rate limits.
-
-        The dialog is skippable; it will be shown again on next startup until
-        valid credentials are saved.
-        """
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Spotify API Credentials (Optional)")
-
-        layout = QFormLayout(dialog)
-
-        info_label = QLabel(
-            "Optional: You can provide your own Spotify Developer 'Client ID' and "
-            "'Client Secret' to authenticate requests and reduce 'rate limit "
-            "exceeded' errors when using Spotify URLs/search. These values are "
-            "stored locally in a .env file that is ignored by git."
-        )
-        info_label.setWordWrap(True)
-        layout.addRow(info_label)
-
-        client_id_input = QLineEdit(self.settings.spotify_client_id)
-        client_secret_input = QLineEdit(self.settings.spotify_client_secret)
-        client_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
-
-        layout.addRow("Client ID:", client_id_input)
-        layout.addRow("Client Secret:", client_secret_input)
-
-        buttons = QDialogButtonBox()
-        save_button = buttons.addButton("Save", QDialogButtonBox.ButtonRole.AcceptRole)
-        skip_button = buttons.addButton("Skip for now", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addRow(buttons)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            client_id = client_id_input.text().strip()
-            client_secret = client_secret_input.text().strip()
-
-            if client_id and client_secret:
-                self.settings.spotify_client_id = client_id
-                self.settings.spotify_client_secret = client_secret
-                self.settings.spotify_credentials_configured = True
-                save_spotify_credentials_to_env(client_id, client_secret)
-                self.settings_manager.save()
-                Toast.show_message(self, "Spotify credentials saved", "success", 3000)
-            else:
-                Toast.show_message(
-                    self,
-                    "Both Client ID and Client Secret are required to enable Spotify API auth.",
-                    "warning",
-                    4000,
-                )
-
     def _show_disclaimer(self) -> None:
         """Show disclaimer dialog on first run."""
         msg_box = QMessageBox(self)
@@ -787,21 +783,8 @@ class SettingsDialog(QDialog):
         self.yt_dlp_input = QLineEdit(self.settings.yt_dlp_path)
         layout.addRow("yt-dlp Path:", self.yt_dlp_input)
         
-        self.spotdl_input = QLineEdit(self.settings.spotdl_path)
-        layout.addRow("spotDL Path:", self.spotdl_input)
-        
         self.ffmpeg_input = QLineEdit(self.settings.ffmpeg_path)
         layout.addRow("FFmpeg Path:", self.ffmpeg_input)
-
-        # Spotify API credentials
-        self.spotify_client_id_input = QLineEdit(self.settings.spotify_client_id)
-        self.spotify_client_id_input.setPlaceholderText("Optional, from Spotify Developer Dashboard")
-        layout.addRow("Spotify Client ID:", self.spotify_client_id_input)
-
-        self.spotify_client_secret_input = QLineEdit(self.settings.spotify_client_secret)
-        self.spotify_client_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.spotify_client_secret_input.setPlaceholderText("Optional, kept locally in .env")
-        layout.addRow("Spotify Client Secret:", self.spotify_client_secret_input)
         
         # Buttons
         buttons = QDialogButtonBox(
@@ -815,16 +798,7 @@ class SettingsDialog(QDialog):
         """Save settings and close."""
         self.settings.max_parallel_downloads = self.parallel_spin.value()
         self.settings.yt_dlp_path = self.yt_dlp_input.text().strip() or "yt-dlp"
-        self.settings.spotdl_path = self.spotdl_input.text().strip() or "spotdl"
         self.settings.ffmpeg_path = self.ffmpeg_input.text().strip() or "ffmpeg"
-
-        # Spotify credentials
-        client_id = self.spotify_client_id_input.text().strip()
-        client_secret = self.spotify_client_secret_input.text().strip()
-        self.settings.spotify_client_id = client_id
-        self.settings.spotify_client_secret = client_secret
-        self.settings.spotify_credentials_configured = bool(client_id and client_secret)
-        save_spotify_credentials_to_env(client_id, client_secret)
 
         super().accept()
 
