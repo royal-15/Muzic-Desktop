@@ -9,10 +9,11 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
 python run.py
 ```
 
-**Install dependencies (Python 3.12 required):**
+**Install dependencies (Python 3.14.6 required):**
 ```bash
 python -m venv venv
 source venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
@@ -22,7 +23,7 @@ pip install -r requirements.txt
 
 **Build a standalone executable (PyInstaller):**
 ```bash
-pip install pyinstaller
+pip install -r requirements-build.txt
 pyinstaller Muzic.spec
 # Or manually:
 pyinstaller --name="Muzic" --windowed --onefile \

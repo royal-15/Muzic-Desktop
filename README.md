@@ -16,7 +16,7 @@ Muzic is a PySide6 desktop app for downloading audio from YouTube videos, YouTub
 
 ### Prerequisites
 
-- Python 3.12
+- Python 3.14.6
 - `yt-dlp`
 - FFmpeg
 
@@ -27,6 +27,7 @@ git clone https://github.com/yourusername/Muzic-Desktop.git
 cd Muzic-Desktop
 python -m venv venv
 source venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 python run.py
 ```
@@ -77,7 +78,7 @@ Muzic-Desktop/
 ## Building Executable
 
 ```bash
-pip install pyinstaller
+pip install -r requirements-build.txt
 pyinstaller Muzic.spec
 ```
 
