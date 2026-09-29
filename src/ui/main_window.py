@@ -1,4 +1,5 @@
 """Main application window."""
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -59,7 +60,35 @@ class MainWindow(QMainWindow):
         if self.settings.first_run:
             self._show_disclaimer()
 
+        # Do not prompt for FFmpeg if the first-run disclaimer was declined.
+        if not self.settings.first_run:
+            self._ensure_ffmpeg_path()
+
         logger.info(f"{APP_NAME} v{APP_VERSION} started")
+
+    def _ensure_ffmpeg_path(self) -> None:
+        """Prompt for FFmpeg when the configured executable cannot be found."""
+        configured_path = (self.settings.ffmpeg_path or "ffmpeg.exe").strip()
+        if self._resolve_ffmpeg_path(configured_path):
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select FFmpeg Executable",
+            str(Path.home()),
+            "FFmpeg executable (ffmpeg.exe);;Executable files (*.exe);;All files (*)",
+        )
+        if file_path:
+            self.settings.ffmpeg_path = file_path
+            self.settings_manager.save()
+
+    @staticmethod
+    def _resolve_ffmpeg_path(configured_path: str) -> str | None:
+        """Return the executable path if it exists directly or on PATH."""
+        candidate = Path(configured_path).expanduser()
+        if candidate.is_file():
+            return str(candidate.resolve())
+        return shutil.which(configured_path)
     
     def _setup_window(self) -> None:
         """Configure main window properties."""
@@ -305,7 +334,6 @@ class MainWindow(QMainWindow):
         self.add_button.setEnabled(False)
         self._playlist_resolver = PlaylistResolver(
             queries,
-            self.settings.yt_dlp_path,
             getattr(self.settings, "timeout_seconds", 300),
             self,
         )
@@ -851,12 +879,13 @@ class SettingsDialog(QDialog):
         self.parallel_spin.setValue(self.settings.max_parallel_downloads)
         layout.addRow("Max Parallel Downloads:", self.parallel_spin)
         
-        # Tool paths
-        self.yt_dlp_input = QLineEdit(self.settings.yt_dlp_path)
-        layout.addRow("yt-dlp Path:", self.yt_dlp_input)
-        
         self.ffmpeg_input = QLineEdit(self.settings.ffmpeg_path)
-        layout.addRow("FFmpeg Path:", self.ffmpeg_input)
+        ffmpeg_row = QHBoxLayout()
+        ffmpeg_row.addWidget(self.ffmpeg_input)
+        self.ffmpeg_browse_button = QPushButton("Browse…")
+        self.ffmpeg_browse_button.clicked.connect(self._browse_ffmpeg)
+        ffmpeg_row.addWidget(self.ffmpeg_browse_button)
+        layout.addRow("FFmpeg Path:", ffmpeg_row)
         
         # Buttons
         buttons = QDialogButtonBox(
@@ -865,12 +894,25 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+
+    def _browse_ffmpeg(self) -> None:
+        """Choose an FFmpeg executable for the configured path."""
+        current_path = self.ffmpeg_input.text().strip()
+        current = Path(current_path).expanduser() if current_path else Path.home()
+        start_directory = str(current if current.is_dir() else current.parent)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select FFmpeg Executable",
+            start_directory,
+            "FFmpeg executable (ffmpeg.exe);;Executable files (*.exe);;All files (*)",
+        )
+        if file_path:
+            self.ffmpeg_input.setText(file_path)
     
     def accept(self) -> None:
         """Save settings and close."""
         self.settings.max_parallel_downloads = self.parallel_spin.value()
-        self.settings.yt_dlp_path = self.yt_dlp_input.text().strip() or "yt-dlp"
-        self.settings.ffmpeg_path = self.ffmpeg_input.text().strip() or "ffmpeg"
+        self.settings.ffmpeg_path = self.ffmpeg_input.text().strip() or "ffmpeg.exe"
 
         super().accept()
 

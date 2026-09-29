@@ -36,8 +36,9 @@ class AppSettings:
     timeout_seconds: int = field(default=300)
     
     # Tool paths
+    # Retained so older config.json files still load; yt-dlp is bundled now.
     yt_dlp_path: str = field(default="yt-dlp")
-    ffmpeg_path: str = field(default="ffmpeg")
+    ffmpeg_path: str = field(default="ffmpeg.exe")
     
     # UI preferences
     window_width: int = field(default=1000)

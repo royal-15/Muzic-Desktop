@@ -10,14 +10,13 @@ Muzic is a PySide6 desktop app for downloading audio from YouTube videos, YouTub
 - **Parallel downloads**: Configure up to 10 simultaneous downloads.
 - **Progress tracking**: View progress, speed, and ETA for each task.
 - **Quality and format controls**: Choose quality presets and MP3, M4A, FLAC, or WAV output.
-- **Configurable tools**: Set custom paths for `yt-dlp` and FFmpeg.
+- **Bundled downloader**: yt-dlp is included in the app; configure the FFmpeg path in Settings.
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.14.6
-- `yt-dlp`
 - FFmpeg
 
 ### Quick Start
@@ -30,12 +29,6 @@ source venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 python run.py
-```
-
-Install external tools if they are not already available on `PATH`:
-
-```bash
-pip install yt-dlp
 ```
 
 Download FFmpeg from https://ffmpeg.org/download.html or configure its path in Settings.
@@ -77,19 +70,48 @@ Muzic-Desktop/
 
 ## Building Executable
 
-```bash
-pip install -r requirements-build.txt
-pyinstaller Muzic.spec
+Build the release executable on a clean Windows x64 machine using Python 3.14.6. The spec produces `dist/Muzic-2.0.1.exe` as a GUI application and bundles yt-dlp. FFmpeg is an external runtime dependency and is not included in the executable.
+
+From PowerShell at the repository root:
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt -r requirements-build.txt
+Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
+pyinstaller --clean --noconfirm Muzic.spec
 ```
 
-Or manually:
+Run `dist\Muzic-2.0.1.exe` and confirm the main window opens. Check the bundled archive for yt-dlp and confirm FFmpeg is absent before publishing:
+
+```powershell
+pyi-archive_viewer -l dist\Muzic-2.0.1.exe | Select-String -Pattern 'yt_dlp|ffmpeg'
+```
+
+The archive listing should contain yt-dlp modules and no FFmpeg executable. Do not add FFmpeg to `binaries` or `datas` in `Muzic.spec`.
+
+## Manual GitHub Release Flow
+
+1. Update the app version and changelog for the release, then commit the release changes.
+2. Create and push a matching version tag, for example `v2.0.1`.
+3. On Windows x64, follow the build steps above. Smoke-check the executable and verify the archive contains no FFmpeg.
+4. Create a GitHub Release for that tag and attach `Muzic-2.0.1.exe` plus a compatible Windows x64 FFmpeg archive as separate assets. Never put FFmpeg inside the Muzic executable.
+5. In the release notes, state the supported FFmpeg version, link to its upstream source, and explain that users must install it or set its path in Muzic Settings. Include brief upgrade notes and a summary of changes.
+
+Users can download FFmpeg from https://ffmpeg.org/download.html or use the separately provided release asset, then configure its executable path in Settings.
+
+## Release Assets
+
+Use clear names that include the app version, platform, and architecture, such as `Muzic-2.0.1-windows-x64.exe`. Keep the separately distributed FFmpeg archive clearly versioned and identify its upstream source and version in the release notes. Verify the FFmpeg distribution's license and redistribution terms before attaching it.
+
+## Building from Source
+
+For development, install the app dependencies and launch it directly:
 
 ```bash
-pyinstaller --name="Muzic" --windowed --onefile \
-            --add-data="src:src" \
-            --add-data="resources:resources" \
-            --hidden-import=PySide6 \
-            run.py
+pip install -r requirements.txt
+python run.py
 ```
 
 ## Disclaimer
@@ -100,5 +122,5 @@ This application is for educational purposes only. Users are responsible for ens
 
 This project is provided as-is for educational purposes.
 
-**Version**: 2.0.0  
+**Version**: 2.0.1
 **Author**: Muzic Team

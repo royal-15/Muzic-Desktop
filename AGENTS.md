@@ -18,7 +18,6 @@ pip install -r requirements.txt
 ```
 
 **External tool dependencies** (must be available on PATH or configured in Settings):
-- `yt-dlp` — YouTube downloads
 - `ffmpeg` — audio conversion
 
 **Build a standalone executable (PyInstaller):**
@@ -27,11 +26,11 @@ pip install -r requirements-build.txt
 pyinstaller Muzic.spec
 # Or manually:
 pyinstaller --name="Muzic" --windowed --onefile \
-            --add-data="src:src" \
-            --add-data="resources:resources" \
-            --hidden-import=PySide6 \
+            --collect-all=yt_dlp \
             run.py
 ```
+
+The executable build bundles the `yt_dlp` Python module. Do not require or configure a separate yt-dlp command.
 
 There are no automated tests in this project.
 
@@ -45,7 +44,7 @@ There are no automated tests in this project.
 - `settings.py` — `AppSettings` is a `@dataclass` serialized to/from `config.json` in the project root. `SettingsManager` is a singleton that owns the single `AppSettings` instance; all UI code accesses settings through it. Settings loading ignores unknown legacy keys from older configs.
 
 ### Download engine (`src/core/`)
-- `download_worker.py` — `DownloadTask` is a plain `@dataclass` (id, url, status, progress, speed, eta, output_file, error_message). `DownloadWorker(QThread)` runs `yt-dlp` as a subprocess, passing FFmpeg via `--ffmpeg-location`, parsing stdout for progress, retrying transient failures with exponential backoff, and classifying common YouTube/network/FFmpeg errors into user-friendly messages. Plain text is converted to `ytsearch1:` before invoking `yt-dlp`.
+- `download_worker.py` — `DownloadTask` is a plain `@dataclass` (id, url, status, progress, speed, eta, output_file, error_message). `DownloadWorker(QThread)` uses the bundled `yt_dlp` Python API, passing the configured FFmpeg path, reporting progress, retrying transient failures with exponential backoff, and classifying common YouTube/network/FFmpeg errors into user-friendly messages. Plain text is converted to `ytsearch1:` before querying yt-dlp.
 - `download_manager.py` — `DownloadManager(QObject)` owns `_tasks: Dict[int, DownloadTask]` and `_workers: Dict[int, DownloadWorker]`. It enforces `settings.max_parallel_downloads` by calling `_try_start_next_task()` after every task finishes. Emits Qt signals (`task_added`, `task_updated`, `task_completed`, `task_failed`, `queue_changed`) that `MainWindow` connects to for UI updates.
 - `url_parser.py` — `URLParser.parse(url)` returns a `URLInfo` dataclass with YouTube source/type/id information. Used for display-oriented parsing.
 

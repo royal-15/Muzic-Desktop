@@ -1,12 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# Release build: PyInstaller creates one windowed executable because this spec
+# ends at EXE (there is no COLLECT step). Keep external tools such as FFmpeg
+# out of binaries and datas; users configure their own FFmpeg installation.
+from PyInstaller.utils.hooks import collect_all
+
+VERSION = '2-0-1'
+
+yt_dlp_datas, yt_dlp_binaries, yt_dlp_hiddenimports = collect_all('yt_dlp')
 
 a = Analysis(
     ['run.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=yt_dlp_binaries,
+    # Python source modules are analyzed from run.py imports. Collect yt-dlp's
+    # dynamic extractors and package data; FFmpeg remains an external tool.
+    datas=yt_dlp_datas,
+    hiddenimports=yt_dlp_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,11 +32,11 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Muzic',
+    name=f'Muzic_v{VERSION}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

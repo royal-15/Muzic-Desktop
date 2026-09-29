@@ -4,7 +4,7 @@ import sys
 
 # Application info
 APP_NAME = "Muzic"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 APP_AUTHOR = "Muzic Team"
 APP_DESCRIPTION = "Modern Music Downloader"
 
