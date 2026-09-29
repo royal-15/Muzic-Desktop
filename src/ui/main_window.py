@@ -23,6 +23,8 @@ from ..config.constants import (
 )
 from ..core.download_manager import DownloadManager
 from ..core.download_worker import DownloadTask
+from ..core.playlist_resolver import PlaylistResolver
+from ..core.url_parser import URLParser
 from ..utils.validators import parse_multiple_urls, is_valid_directory, is_valid_url, is_youtube_url
 from ..utils.logger import logger
 from .styles.theme import Theme
@@ -44,6 +46,8 @@ class MainWindow(QMainWindow):
         
         # Initialize download manager
         self.download_manager = DownloadManager(self.settings, self)
+        self._playlist_resolver: PlaylistResolver | None = None
+        self._closing = False
         
         # Setup UI
         self._setup_window()
@@ -256,6 +260,10 @@ class MainWindow(QMainWindow):
     
     def _on_add_clicked(self) -> None:
         """Handle add button click."""
+        if self._playlist_resolver and self._playlist_resolver.isRunning():
+            Toast.show_message(self, "Please wait for playlist resolution to finish", "info", 2500)
+            return
+
         query_text = self.url_input.text().strip()
         mode = self.mode_combo.currentText()
         
@@ -277,13 +285,72 @@ class MainWindow(QMainWindow):
             Toast.show_message(self, "No valid URLs or queries found", "error")
             return
         
-        # Add tasks
-        self.download_manager.add_tasks(queries)
-        
-        # Clear input
+        playlist_urls = [query for query in queries if URLParser.is_playlist(query)]
+        if playlist_urls:
+            self._resolve_playlists(queries, mode == "From .txt")
+        else:
+            self.download_manager.add_tasks(queries)
+            Toast.show_message(self, f"Added {len(queries)} download(s) to queue", "success")
+
+        # Clear input after the submission has been accepted.
         self.url_input.clear()
-        
-        Toast.show_message(self, f"Added {len(queries)} download(s) to queue", "success")
+
+    def _resolve_playlists(self, queries: list[str], from_txt: bool) -> None:
+        """Expand playlist URLs before adding individual tasks to the queue."""
+        if from_txt:
+            Toast.show_message(self, "Resolving playlist URLs from text file...", "info", 4000)
+        else:
+            Toast.show_message(self, "Resolving playlist songs...", "info", 3000)
+
+        self.add_button.setEnabled(False)
+        self._playlist_resolver = PlaylistResolver(
+            queries,
+            self.settings.yt_dlp_path,
+            getattr(self.settings, "timeout_seconds", 300),
+            self,
+        )
+        self._playlist_resolver.resolved.connect(self._on_playlists_resolved)
+        self._playlist_resolver.finished.connect(self._on_playlist_resolver_finished)
+        self._playlist_resolver.start()
+
+    def _on_playlists_resolved(self, results: list) -> None:
+        """Queue resolved tracks and ask before falling back for failures."""
+        if self._closing:
+            return
+        queries_to_queue = []
+        for original, resolution in results:
+            if resolution is None:
+                queries_to_queue.append(original)
+                continue
+
+            if resolution.video_urls:
+                queries_to_queue.extend(resolution.video_urls)
+                continue
+
+            answer = QMessageBox.question(
+                self,
+                "Playlist Could Not Be Expanded",
+                f"Could not resolve playlist:\n{resolution.playlist_url}\n\n"
+                f"{resolution.error}\n\nQueue the playlist using the current download behavior?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                queries_to_queue.append(resolution.playlist_url)
+
+        if queries_to_queue:
+            self.download_manager.add_tasks(queries_to_queue)
+            Toast.show_message(
+                self,
+                f"Added {len(queries_to_queue)} download(s) to queue",
+                "success",
+            )
+        else:
+            Toast.show_message(self, "No downloads were added", "warning", 3000)
+
+    def _on_playlist_resolver_finished(self) -> None:
+        self.add_button.setEnabled(True)
+        self._playlist_resolver = None
     
     def _process_query(self, text: str, mode: str) -> list[str]:
         """Process input text based on selected mode."""
@@ -741,6 +808,11 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close event."""
+        self._closing = True
+        if self._playlist_resolver and self._playlist_resolver.isRunning():
+            self._playlist_resolver.requestInterruption()
+            self._playlist_resolver.wait()
+
         # Save window state
         self.settings.window_maximized = self.isMaximized()
         if not self.isMaximized():

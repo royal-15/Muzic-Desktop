@@ -1,10 +1,10 @@
 {
-  "output_dir": "/home/rajat/Desktop/temp",
+  "output_dir": "/tmp/songs",
   "theme": "dark",
   "playlist_folders": {},
   "playlist_urls": {},
   "default_quality": "320kbps",
-  "default_format": "mp3",
+  "default_format": "flac",
   "max_parallel_downloads": 3,
   "retry_attempts": 3,
   "timeout_seconds": 300,
