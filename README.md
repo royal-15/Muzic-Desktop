@@ -70,7 +70,9 @@ Muzic-Desktop/
 
 ## Building Executable
 
-Build the release executable on a clean Windows x64 machine using Python 3.14.6. The spec produces `dist/Muzic-2.0.1.exe` as a GUI application and bundles yt-dlp. FFmpeg is an external runtime dependency and is not included in the executable.
+Build each release artifact on its target operating system using Python 3.14.6. PyInstaller does not create one executable that runs on both Windows and Linux: build the Windows `.exe` on Windows and the Linux executable on Linux. The spec names outputs with the version, platform, and architecture, and bundles yt-dlp. FFmpeg is an external runtime dependency and is not included.
+
+### Windows x64
 
 From PowerShell at the repository root:
 
@@ -83,10 +85,29 @@ Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 pyinstaller --clean --noconfirm Muzic.spec
 ```
 
-Run `dist\Muzic-2.0.1.exe` and confirm the main window opens. Check the bundled archive for yt-dlp and confirm FFmpeg is absent before publishing:
+This produces `dist/Muzic-2.0.1-windows-x64.exe`. Run it and confirm the main window opens. Check that yt-dlp is bundled and FFmpeg is absent:
 
 ```powershell
-pyi-archive_viewer -l dist\Muzic-2.0.1.exe | Select-String -Pattern 'yt_dlp|ffmpeg'
+pyi-archive_viewer -l dist\Muzic-2.0.1-windows-x64.exe | Select-String -Pattern 'yt_dlp|ffmpeg'
+```
+
+### Linux x64
+
+From a Linux shell at the repository root:
+
+```bash
+python3.14 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt -r requirements-build.txt
+rm -rf build dist
+pyinstaller --clean --noconfirm Muzic.spec
+```
+
+This produces `dist/Muzic-2.0.1-linux-x64` (no `.exe` suffix). Run it and confirm the main window opens. Check that yt-dlp is bundled and FFmpeg is absent:
+
+```bash
+pyi-archive_viewer -l dist/Muzic-2.0.1-linux-x64 | grep -Ei 'yt_dlp|ffmpeg'
 ```
 
 The archive listing should contain yt-dlp modules and no FFmpeg executable. Do not add FFmpeg to `binaries` or `datas` in `Muzic.spec`.
@@ -95,15 +116,15 @@ The archive listing should contain yt-dlp modules and no FFmpeg executable. Do n
 
 1. Update the app version and changelog for the release, then commit the release changes.
 2. Create and push a matching version tag, for example `v2.0.1`.
-3. On Windows x64, follow the build steps above. Smoke-check the executable and verify the archive contains no FFmpeg.
-4. Create a GitHub Release for that tag and attach `Muzic-2.0.1.exe` plus a compatible Windows x64 FFmpeg archive as separate assets. Never put FFmpeg inside the Muzic executable.
+3. Follow the Windows x64 and Linux x64 build steps above on their respective operating systems. Smoke-check each artifact and verify its archive contains no FFmpeg.
+4. Create a GitHub Release for that tag and attach `Muzic-2.0.1-windows-x64.exe` and `Muzic-2.0.1-linux-x64`, plus the separately distributed FFmpeg archive(s). Never put FFmpeg inside a Muzic executable.
 5. In the release notes, state the supported FFmpeg version, link to its upstream source, and explain that users must install it or set its path in Muzic Settings. Include brief upgrade notes and a summary of changes.
 
 Users can download FFmpeg from https://ffmpeg.org/download.html or use the separately provided release asset, then configure its executable path in Settings.
 
 ## Release Assets
 
-Use clear names that include the app version, platform, and architecture, such as `Muzic-2.0.1-windows-x64.exe`. Keep the separately distributed FFmpeg archive clearly versioned and identify its upstream source and version in the release notes. Verify the FFmpeg distribution's license and redistribution terms before attaching it.
+Use clear names that include the app version, platform, and architecture: `Muzic-2.0.1-windows-x64.exe` and `Muzic-2.0.1-linux-x64`. These are separate native builds and each runs only on its matching platform. Keep separately distributed FFmpeg archives clearly versioned and identify their upstream source and version in the release notes. Verify the FFmpeg distribution's license and redistribution terms before attaching them.
 
 ## Building from Source
 

@@ -3,9 +3,15 @@
 # Release build: PyInstaller creates one windowed executable because this spec
 # ends at EXE (there is no COLLECT step). Keep external tools such as FFmpeg
 # out of binaries and datas; users configure their own FFmpeg installation.
+import sys
+
 from PyInstaller.utils.hooks import collect_all
 
-VERSION = '2-0-1'
+VERSION = '2.0.1'
+PLATFORM_NAMES = {'win32': 'windows', 'linux': 'linux'}
+if sys.platform not in PLATFORM_NAMES:
+    raise RuntimeError(f'Unsupported build platform: {sys.platform}')
+PLATFORM = PLATFORM_NAMES[sys.platform]
 
 yt_dlp_datas, yt_dlp_binaries, yt_dlp_hiddenimports = collect_all('yt_dlp')
 
@@ -32,7 +38,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name=f'Muzic_v{VERSION}',
+    name=f'Muzic-{VERSION}-{PLATFORM}-x64',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
