@@ -31,12 +31,15 @@ class DownloadTask:
     eta: str = ""
     output_file: Optional[str] = None
     error_message: Optional[str] = None
+    output_dir: str = ""
+    title: str = ""
 
 
 class DownloadWorker(QThread):
     """Worker thread for downloading audio with the bundled yt-dlp module."""
 
     progress_updated = Signal(int, str, str)
+    title_updated = Signal(str)
     status_changed = Signal(str)
     finished = Signal(str, str, str)
 
@@ -48,6 +51,7 @@ class DownloadWorker(QThread):
         self._started_at = 0.0
         self._timeout_seconds = 300
         self._output_file: Optional[str] = None
+        self._last_title = task.title
 
     def cancel(self) -> None:
         """Request cancellation; yt-dlp observes it in its progress hook."""
@@ -59,7 +63,8 @@ class DownloadWorker(QThread):
         self.status_changed.emit("Preparing download...")
 
         try:
-            os.makedirs(self.settings.output_dir, exist_ok=True)
+            output_dir = self.task.output_dir or self.settings.output_dir
+            os.makedirs(output_dir, exist_ok=True)
             self._timeout_seconds = self._get_timeout()
             self._started_at = time.monotonic()
             query = self.task.url
@@ -121,7 +126,7 @@ class DownloadWorker(QThread):
     def _build_options(self) -> dict:
         options = {
             "format": "bestaudio/best",
-            "outtmpl": os.path.join(self.settings.output_dir, "%(title)s.%(ext)s"),
+            "outtmpl": os.path.join(self.task.output_dir or self.settings.output_dir, "%(title)s.%(ext)s"),
             "noplaylist": False,
             "quiet": True,
             "no_warnings": True,
@@ -168,6 +173,7 @@ class DownloadWorker(QThread):
             )
 
         info = data.get("info_dict", {})
+        self._emit_title(info.get("title"))
         filepath = info.get("filepath") or info.get("_filename")
         if filepath:
             self._output_file = filepath
@@ -193,6 +199,15 @@ class DownloadWorker(QThread):
             self._output_file = filepath
 
     def _record_output(self, result: Optional[dict]) -> None:
+        if isinstance(result, dict):
+            self._emit_title(result.get("title"))
+            for entry in result.get("entries") or []:
+                if isinstance(entry, dict):
+                    self._emit_title(entry.get("title"))
+                    if entry.get("filepath") or entry.get("_filename"):
+                        self._output_file = entry.get("filepath") or entry.get("_filename")
+                        return
+
         if self._output_file:
             return
         if isinstance(result, dict):
@@ -200,11 +215,13 @@ class DownloadWorker(QThread):
             if filepath:
                 self._output_file = filepath
                 return
-            entries = result.get("entries") or []
-            for entry in entries:
-                if isinstance(entry, dict) and (entry.get("filepath") or entry.get("_filename")):
-                    self._output_file = entry.get("filepath") or entry.get("_filename")
-                    return
+
+    def _emit_title(self, title: Optional[str]) -> None:
+        if title:
+            title = str(title)
+            if title != self._last_title:
+                self._last_title = title
+                self.title_updated.emit(title)
 
     def _get_timeout(self) -> int:
         try:

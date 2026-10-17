@@ -1,5 +1,6 @@
 """Download manager for coordinating multiple download tasks."""
 from typing import Dict, List, Optional
+from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from ..config.settings import AppSettings
@@ -30,6 +31,7 @@ class DownloadManager(QObject):
         task = DownloadTask(
             id=self._next_task_id,
             url=url,
+            output_dir=str(Path(self.settings.output_dir).expanduser().resolve()),
             status=STATUS_QUEUED
         )
         self._next_task_id += 1
@@ -181,6 +183,9 @@ class DownloadManager(QObject):
         worker.progress_updated.connect(
             lambda progress, speed, eta, t=task: self._on_task_progress(t, progress, speed, eta)
         )
+        worker.title_updated.connect(
+            lambda title, t=task: self._on_task_title(t, title)
+        )
         worker.finished.connect(
             lambda status, output, error, t=task: self._on_task_finished(t, status, output, error)
         )
@@ -196,6 +201,10 @@ class DownloadManager(QObject):
         task.progress = progress
         task.speed = speed
         task.eta = eta
+        self.task_updated.emit(task)
+
+    def _on_task_title(self, task: DownloadTask, title: str) -> None:
+        task.title = title
         self.task_updated.emit(task)
     
     def _on_task_finished(self, task: DownloadTask, status: str, output_file: str, error_message: str) -> None:

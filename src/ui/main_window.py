@@ -1,19 +1,23 @@
 """Main application window."""
 import shutil
+import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QComboBox, QLabel,
     QTableWidget, QTableWidgetItem, QProgressBar,
     QFileDialog, QHeaderView, QMessageBox, QSpinBox,
     QDialog, QFormLayout, QDialogButtonBox, QInputDialog,
     QListWidget, QListWidgetItem, QToolButton, QMenu
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QIcon, QCloseEvent
+from PySide6.QtGui import QDesktopServices
 
 from ..config.settings import SettingsManager
 from ..config.constants import (
@@ -21,6 +25,7 @@ from ..config.constants import (
     WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT,
     QUALITY_OPTIONS, FORMAT_OPTIONS,
     STATUS_QUEUED, STATUS_DOWNLOADING, STATUS_COMPLETED, STATUS_FAILED,
+    LOGO_PATH,
 )
 from ..core.download_manager import DownloadManager
 from ..core.download_worker import DownloadTask
@@ -32,6 +37,93 @@ from .styles.theme import Theme
 from .components.toast import Toast
 
 
+def _desktop_entry_escape(value: str) -> str:
+    """Quote one value for the Exec and Icon fields in a desktop file."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    for character in ("$", "`"):
+        escaped = escaped.replace(character, "\\" + character)
+    escaped = escaped.replace("%", "%%")
+    return f'"{escaped}"'
+
+
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _create_desktop_entry_for_current_user() -> None:
+    """Create a current-user launcher entry for the current platform."""
+    if sys.platform == "win32":
+        _create_windows_start_menu_entry()
+    elif sys.platform.startswith("linux"):
+        _create_linux_applications_entry()
+    else:
+        raise OSError("Launcher entries are supported on Windows and Linux.")
+
+
+def _launch_target() -> tuple[str, str]:
+    if getattr(sys, "frozen", False):
+        return sys.executable, ""
+    launcher = sys.executable
+    if sys.platform == "win32":
+        pythonw = Path(launcher).with_name("pythonw.exe")
+        if pythonw.is_file():
+            launcher = str(pythonw)
+    return launcher, str(Path(__file__).resolve().parents[2] / "run.py")
+
+
+def _create_windows_start_menu_entry() -> None:
+    programs = Path(os.environ.get("APPDATA", str(Path.home()))) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    programs.mkdir(parents=True, exist_ok=True)
+    shortcut = programs / "Muzic.lnk"
+    target, arguments = _launch_target()
+    icon_path = sys.executable if getattr(sys, "frozen", False) else str(LOGO_PATH)
+    script = (
+        "$shell = New-Object -ComObject WScript.Shell; "
+        f"$shortcut = $shell.CreateShortcut({_powershell_literal(str(shortcut))}); "
+        f"$shortcut.TargetPath = {_powershell_literal(target)}; "
+        f"$shortcut.Arguments = {_powershell_literal(arguments)}; "
+        f"$shortcut.WorkingDirectory = {_powershell_literal(str(Path(target).parent))}; "
+        f"$shortcut.IconLocation = {_powershell_literal(icon_path)}; "
+        "$shortcut.Save()"
+    )
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _create_linux_applications_entry() -> None:
+    applications = Path.home() / ".local" / "share" / "applications"
+    icons = Path.home() / ".local" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+    applications.mkdir(parents=True, exist_ok=True)
+    icons.mkdir(parents=True, exist_ok=True)
+    if not LOGO_PATH.is_file():
+        raise OSError(f"Application icon not found: {LOGO_PATH}")
+
+    icon_path = icons / "muzic.png"
+    pixmap = QIcon(str(LOGO_PATH)).pixmap(256, 256)
+    if pixmap.isNull() or not pixmap.save(str(icon_path), "PNG"):
+        raise OSError("Could not prepare the application menu icon.")
+
+    target, arguments = _launch_target()
+    exec_value = " ".join(_desktop_entry_escape(part) for part in (target, arguments) if part)
+    entry = applications / "muzic.desktop"
+    entry.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Muzic\n"
+        "Comment=Modern Music Downloader\n"
+        f"Exec={exec_value}\n"
+        f"Icon={icon_path}\n"
+        "Terminal=false\n"
+        "Categories=AudioVideo;Audio;\n",
+        encoding="utf-8",
+    )
+    entry.chmod(0o755)
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
     
@@ -41,6 +133,13 @@ class MainWindow(QMainWindow):
         # Load settings
         self.settings_manager = SettingsManager()
         self.settings = self.settings_manager.settings
+
+        if LOGO_PATH.is_file():
+            app_icon = QIcon(str(LOGO_PATH))
+            self.setWindowIcon(app_icon)
+            app = QApplication.instance()
+            if app:
+                app.setWindowIcon(app_icon)
         
         # Initialize theme
         self.theme = Theme(self.settings.theme)
@@ -59,6 +158,10 @@ class MainWindow(QMainWindow):
         # Show disclaimer if first run
         if self.settings.first_run:
             self._show_disclaimer()
+            if not self.settings.first_run and (
+                sys.platform == "win32" or sys.platform.startswith("linux")
+            ):
+                self._prompt_add_desktop_entry()
 
         # Do not prompt for FFmpeg if the first-run disclaimer was declined.
         if not self.settings.first_run:
@@ -172,11 +275,12 @@ class MainWindow(QMainWindow):
         
         # Queue table
         self.queue_table = QTableWidget()
-        self.queue_table.setColumnCount(6)
+        self.queue_table.setColumnCount(7)
         self.queue_table.setHorizontalHeaderLabels([
-            "ID", "URL", "Status", "Progress", "Speed", "ETA"
+            "ID", "Name", "URL", "Status", "Progress", "Speed", "Dest"
         ])
-        self.queue_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.queue_table.cellClicked.connect(self._on_queue_cell_clicked)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.queue_table.setAlternatingRowColors(True)
@@ -403,8 +507,7 @@ class MainWindow(QMainWindow):
                 else:
                     return []  # Invalid for this mode
             elif mode == "Search on YouTube":
-                # Use yt-dlp search syntax
-                return [f"ytsearch1:{text}"]
+                return [url] if is_youtube_url(url) else [f"ytsearch1:{self._append_song(text)}"]
         else:
             if is_valid_url(text):
                 Toast.show_message(self, "Only YouTube URLs are supported", "error", 3000)
@@ -413,12 +516,18 @@ class MainWindow(QMainWindow):
             # No valid URLs, treat as search query
             if mode == "Auto" or mode == "Search on YouTube":
                 # Default to YouTube search
-                return [f"ytsearch1:{text}"]
+                return [f"ytsearch1:{self._append_song(text)}"]
             elif mode == "YouTube URL":
                 # Must be a URL in this mode
                 return []
         
         return []
+
+    @staticmethod
+    def _append_song(query: str) -> str:
+        """Bias YouTube search toward complete songs."""
+        query = query.strip()
+        return query if re.search(r"\bsong\b", query, re.IGNORECASE) else f"{query} song"
 
     def _process_txt_file(self, file_path: str) -> list[str]:
         """Read a .txt batch file and convert each line to a download query."""
@@ -451,7 +560,7 @@ class MainWindow(QMainWindow):
             elif is_valid_url(line):
                 continue
             else:
-                query = f"ytsearch1:{line}"
+                query = f"ytsearch1:{self._append_song(line)}"
 
             seen.add(line)
             queries.append(query)
@@ -721,22 +830,7 @@ class MainWindow(QMainWindow):
         row = self.queue_table.rowCount()
         self.queue_table.insertRow(row)
         
-        self.queue_table.setItem(row, 0, QTableWidgetItem(str(task.id)))
-
-        display_text, tooltip = self._get_task_display_and_tooltip(task)
-        url_item = QTableWidgetItem(display_text)
-        if tooltip:
-            url_item.setToolTip(tooltip)
-        self.queue_table.setItem(row, 1, url_item)
-
-        self.queue_table.setItem(row, 2, QTableWidgetItem(task.status.capitalize()))
-        
-        progress_bar = QProgressBar()
-        progress_bar.setValue(task.progress)
-        self.queue_table.setCellWidget(row, 3, progress_bar)
-        
-        self.queue_table.setItem(row, 4, QTableWidgetItem(task.speed))
-        self.queue_table.setItem(row, 5, QTableWidgetItem(task.eta))
+        self._populate_task_row(row, task)
     
     def _on_task_updated(self, task: DownloadTask) -> None:
         """Handle task update."""
@@ -744,24 +838,29 @@ class MainWindow(QMainWindow):
         for row in range(self.queue_table.rowCount()):
             id_item = self.queue_table.item(row, 0)
             if id_item and int(id_item.text()) == task.id:
-                # Update status
-                status_item = self.queue_table.item(row, 2)
+                title_item = self.queue_table.item(row, 1)
+                if title_item and task.title:
+                    title_item.setText(task.title)
+                    title_item.setToolTip(task.title)
+
+                status_item = self.queue_table.item(row, 3)
                 if status_item:
                     status_item.setText(task.status.capitalize())
+                    status_item.setToolTip(task.error_message or "")
                 
                 # Update progress bar
-                progress_bar = self.queue_table.cellWidget(row, 3)
+                progress_bar = self.queue_table.cellWidget(row, 4)
                 if isinstance(progress_bar, QProgressBar):
                     progress_bar.setValue(task.progress)
                 
-                # Update speed and ETA
-                speed_item = self.queue_table.item(row, 4)
+                speed_item = self.queue_table.item(row, 5)
                 if speed_item:
                     speed_item.setText(task.speed or "")
-                
-                eta_item = self.queue_table.item(row, 5)
-                if eta_item:
-                    eta_item.setText(task.eta or "")
+
+                destination_item = self.queue_table.item(row, 6)
+                if destination_item:
+                    destination_item.setText(task.output_dir)
+                    destination_item.setToolTip(task.output_dir)
                 
                 break
     
@@ -785,23 +884,49 @@ class MainWindow(QMainWindow):
         for task in all_tasks:
             row = self.queue_table.rowCount()
             self.queue_table.insertRow(row)
-            
-            self.queue_table.setItem(row, 0, QTableWidgetItem(str(task.id)))
+            self._populate_task_row(row, task)
 
-            display_text, tooltip = self._get_task_display_and_tooltip(task)
-            url_item = QTableWidgetItem(display_text)
-            if tooltip:
-                url_item.setToolTip(tooltip)
-            self.queue_table.setItem(row, 1, url_item)
+    def _populate_task_row(self, row: int, task: DownloadTask) -> None:
+        self.queue_table.setItem(row, 0, QTableWidgetItem(str(task.id)))
 
-            self.queue_table.setItem(row, 2, QTableWidgetItem(task.status.capitalize()))
-            
-            progress_bar = QProgressBar()
-            progress_bar.setValue(task.progress)
-            self.queue_table.setCellWidget(row, 3, progress_bar)
-            
-            self.queue_table.setItem(row, 4, QTableWidgetItem(task.speed or ""))
-            self.queue_table.setItem(row, 5, QTableWidgetItem(task.eta or ""))
+        title = task.title or "Resolving title…"
+        title_item = QTableWidgetItem(title)
+        title_item.setToolTip(task.title or "Title is read from YouTube metadata")
+        self.queue_table.setItem(row, 1, title_item)
+
+        url_item = QTableWidgetItem(task.url)
+        url_item.setToolTip(task.url)
+        self.queue_table.setItem(row, 2, url_item)
+        status_item = QTableWidgetItem(task.status.capitalize())
+        status_item.setToolTip(task.error_message or "")
+        self.queue_table.setItem(row, 3, status_item)
+
+        progress_bar = QProgressBar()
+        progress_bar.setValue(task.progress)
+        self.queue_table.setCellWidget(row, 4, progress_bar)
+        self.queue_table.setItem(row, 5, QTableWidgetItem(task.speed or ""))
+
+        destination_item = QTableWidgetItem(task.output_dir)
+        destination_item.setToolTip(f"Open folder: {task.output_dir}")
+        destination_item.setForeground(self.palette().link())
+        self.queue_table.setItem(row, 6, destination_item)
+
+    def _on_queue_cell_clicked(self, row: int, column: int) -> None:
+        if column != 6:
+            return
+        id_item = self.queue_table.item(row, 0)
+        if not id_item:
+            return
+        task = self.download_manager.get_task(int(id_item.text()))
+        if not task or not task.output_dir:
+            return
+        destination = Path(task.output_dir).expanduser()
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(destination.resolve()))):
+                Toast.show_message(self, "Could not open destination folder", "error", 3000)
+        except OSError as error:
+            Toast.show_message(self, f"Could not open destination folder: {error}", "error", 4000)
     
     def _update_stats(self) -> None:
         """Update status bar with statistics."""
@@ -833,6 +958,27 @@ class MainWindow(QMainWindow):
             self.settings_manager.save()
         else:
             QTimer.singleShot(0, self.close)
+
+    def _prompt_add_desktop_entry(self) -> None:
+        """Offer a current-user launcher entry once after disclaimer acceptance."""
+        result = QMessageBox.question(
+            self,
+            "Add Muzic to Applications?",
+            "Would you like to add Muzic to your applications menu?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if result == QMessageBox.StandardButton.Yes:
+            try:
+                _create_desktop_entry_for_current_user()
+            except (OSError, subprocess.SubprocessError) as error:
+                QMessageBox.critical(self, "Launcher Entry Failed", str(error))
+                return
+            QMessageBox.information(
+                self,
+                "Launcher Entry Added",
+                "Muzic is now available in your applications menu.",
+            )
     
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle window close event."""
@@ -886,6 +1032,10 @@ class SettingsDialog(QDialog):
         self.ffmpeg_browse_button.clicked.connect(self._browse_ffmpeg)
         ffmpeg_row.addWidget(self.ffmpeg_browse_button)
         layout.addRow("FFmpeg Path:", ffmpeg_row)
+
+        self.desktop_entry_button = QPushButton("Add Desktop Entry")
+        self.desktop_entry_button.clicked.connect(self._add_desktop_entry)
+        layout.addRow("Launcher:", self.desktop_entry_button)
         
         # Buttons
         buttons = QDialogButtonBox(
@@ -908,7 +1058,21 @@ class SettingsDialog(QDialog):
         )
         if file_path:
             self.ffmpeg_input.setText(file_path)
-    
+
+    def _add_desktop_entry(self) -> None:
+        """Create a current-user launcher entry for the current platform."""
+        try:
+            _create_desktop_entry_for_current_user()
+        except (OSError, subprocess.SubprocessError) as error:
+            QMessageBox.critical(self, "Launcher Entry Failed", str(error))
+            return
+
+        QMessageBox.information(
+            self,
+            "Launcher Entry Added",
+            "Muzic is now available in your applications menu.",
+        )
+
     def accept(self) -> None:
         """Save settings and close."""
         self.settings.max_parallel_downloads = self.parallel_spin.value()
@@ -946,9 +1110,7 @@ class ManagePlaylistsDialog(QDialog):
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(3)
         self.table_widget.setHorizontalHeaderLabels(["Name", "Folder Path", "Playlist URL"])
-        self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_widget.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_widget.setAlternatingRowColors(True)
         self.table_widget.itemChanged.connect(self._on_item_changed)

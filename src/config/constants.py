@@ -25,7 +25,7 @@ LOG_FILE = APP_DIR / "muzic.log"
 # Resource paths
 RESOURCES_DIR = BASE_DIR / "resources"
 ICONS_DIR = RESOURCES_DIR / "icons"
-LOGO_PATH = RESOURCES_DIR / "logo.ico"
+LOGO_PATH = BASE_DIR / "app-logo.ico"
 
 # Default settings
 DEFAULT_OUTPUT_DIR = str(Path.home() / "Downloads" / "Muzic")

@@ -21,7 +21,7 @@ a = Analysis(
     binaries=yt_dlp_binaries,
     # Python source modules are analyzed from run.py imports. Collect yt-dlp's
     # dynamic extractors and package data; FFmpeg remains an external tool.
-    datas=yt_dlp_datas,
+    datas=yt_dlp_datas + [('app-logo.ico', '.')],
     hiddenimports=yt_dlp_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -51,4 +51,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='app-logo.ico',
 )
