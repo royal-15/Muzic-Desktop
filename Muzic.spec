@@ -7,7 +7,7 @@ import sys
 
 from PyInstaller.utils.hooks import collect_all
 
-VERSION = '2.0.1'
+VERSION = '2.0.2'
 PLATFORM_NAMES = {'win32': 'windows', 'linux': 'linux'}
 if sys.platform not in PLATFORM_NAMES:
     raise RuntimeError(f'Unsupported build platform: {sys.platform}')

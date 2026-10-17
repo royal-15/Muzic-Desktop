@@ -1,10 +1,11 @@
 """Application constants and configuration values."""
+
 from pathlib import Path
 import sys
 
 # Application info
 APP_NAME = "Muzic"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 APP_AUTHOR = "Muzic Team"
 APP_DESCRIPTION = "Modern Music Downloader"
 
