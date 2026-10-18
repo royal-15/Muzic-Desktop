@@ -1,5 +1,7 @@
 """Download worker thread for processing individual download tasks."""
 import os
+import random
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -17,6 +19,12 @@ from ..config.constants import (
 from ..config.settings import AppSettings
 from ..utils.logger import logger
 from ..utils.validators import is_youtube_url
+from .ytdlp_options import (
+    authentication_options,
+    javascript_runtime_options,
+    redact_sensitive_text,
+)
+from .rate_limit import RateLimitCoordinator
 
 
 @dataclass
@@ -33,6 +41,7 @@ class DownloadTask:
     error_message: Optional[str] = None
     output_dir: str = ""
     title: str = ""
+    status_message: str = ""
 
 
 class DownloadWorker(QThread):
@@ -43,10 +52,17 @@ class DownloadWorker(QThread):
     status_changed = Signal(str)
     finished = Signal(str, str, str)
 
-    def __init__(self, task: DownloadTask, settings: AppSettings, parent=None):
+    def __init__(
+        self,
+        task: DownloadTask,
+        settings: AppSettings,
+        parent=None,
+        rate_limit_coordinator: Optional[RateLimitCoordinator] = None,
+    ):
         super().__init__(parent)
         self.task = task
         self.settings = settings
+        self.rate_limit_coordinator = rate_limit_coordinator or RateLimitCoordinator()
         self._should_cancel = False
         self._started_at = 0.0
         self._timeout_seconds = 300
@@ -71,17 +87,32 @@ class DownloadWorker(QThread):
             if not is_youtube_url(query) and not query.startswith("ytsearch"):
                 query = f"ytsearch1:{query}"
 
-            max_attempts = max(1, getattr(self.settings, "retry_attempts", 0) + 1)
+            try:
+                max_general_retries = max(0, int(getattr(self.settings, "retry_attempts", 0)))
+            except (TypeError, ValueError):
+                max_general_retries = 0
+            rate_limit_retries = 0
+            general_retries = 0
+            attempt = 0
             error_message = "Download failed"
-            for attempt in range(1, max_attempts + 1):
+            max_rate_limit_retries = 3
+            while True:
                 if self._should_cancel:
                     break
+                if self.rate_limit_coordinator.remaining() > 0:
+                    self.status_changed.emit("Waiting for YouTube rate limit cooldown...")
+                if self.rate_limit_coordinator.wait(lambda: self._should_cancel):
+                    break
+                attempt += 1
+                self.status_changed.emit(
+                    "Retrying download..." if attempt > 1 else "Preparing download..."
+                )
                 self._started_at = time.monotonic()
                 self._output_file = None
                 if attempt > 1:
                     logger.info(
                         f"Retrying download task {self.task.id} "
-                        f"(attempt {attempt}/{max_attempts})"
+                        f"(attempt {attempt})"
                     )
 
                 try:
@@ -98,15 +129,33 @@ class DownloadWorker(QThread):
                 except DownloadError as error:
                     error_message = self._classify_error_message(str(error))
                 except Exception as error:
-                    logger.exception(f"Exception in download task {self.task.id}")
+                    logger.error(
+                        f"Exception in download task {self.task.id}: "
+                        f"{redact_sensitive_text(str(error))}"
+                    )
                     error_message = self._classify_error_message(str(error))
 
                 if self._should_cancel:
                     break
-                if attempt == max_attempts or not self._is_retryable_error(error_message):
+                if self._is_rate_limit_error(error_message):
+                    if rate_limit_retries >= max_rate_limit_retries:
+                        break
+                    rate_limit_retries += 1
+                    backoff_seconds = min(60 * (2 ** (rate_limit_retries - 1)), 900)
+                    backoff_seconds += random.uniform(0, min(15, backoff_seconds * 0.1))
+                    shared_delay = self.rate_limit_coordinator.defer(backoff_seconds)
+                    logger.warning(
+                        f"Task {self.task.id} received HTTP 429; pausing YouTube "
+                        f"requests for about {int(shared_delay)} seconds "
+                        f"(rate-limit retry {rate_limit_retries}/{max_rate_limit_retries})."
+                    )
+                    self.status_changed.emit("Waiting for YouTube rate limit cooldown...")
+                    continue
+                elif general_retries < max_general_retries and self._is_retryable_error(error_message):
+                    general_retries += 1
+                    backoff_seconds = min(5 * general_retries, 30)
+                else:
                     break
-
-                backoff_seconds = min(5 * attempt, 30)
                 logger.info(
                     f"Will retry task {self.task.id} in {backoff_seconds} seconds "
                     "due to transient error."
@@ -117,11 +166,18 @@ class DownloadWorker(QThread):
             if self._should_cancel:
                 self.finished.emit(STATUS_CANCELLED, "", "Download cancelled by user")
             else:
+                if rate_limit_retries:
+                    error_message += (
+                        f" Muzic applied a shared cooldown and retried "
+                        f"{rate_limit_retries} time(s). Wait longer before trying again; "
+                        "YouTube may be limiting this network's IP address."
+                    )
                 logger.error(f"Task {self.task.id} failed: {error_message}")
                 self.finished.emit(STATUS_FAILED, "", error_message)
         except Exception as error:
-            logger.exception(f"Exception in download task {self.task.id}")
-            self.finished.emit(STATUS_FAILED, "", str(error))
+            safe_error = redact_sensitive_text(str(error))
+            logger.error(f"Exception in download task {self.task.id}: {safe_error}")
+            self.finished.emit(STATUS_FAILED, "", safe_error)
 
     def _build_options(self) -> dict:
         options = {
@@ -138,8 +194,14 @@ class DownloadWorker(QThread):
             "fragment_retries": 0,
             "ignoreerrors": False,
         }
-        if self.settings.ffmpeg_path:
-            options["ffmpeg_location"] = self.settings.ffmpeg_path
+        options.update(javascript_runtime_options(self.settings))
+        options.update(authentication_options(self.settings))
+        ffmpeg_path = (self.settings.ffmpeg_path or "").strip()
+        if ffmpeg_path:
+            resolved_ffmpeg = ffmpeg_path if os.path.isfile(ffmpeg_path) or os.path.isdir(ffmpeg_path) else shutil.which(ffmpeg_path)
+            if not resolved_ffmpeg and os.path.basename(ffmpeg_path).lower() in {"ffmpeg.exe", "ffmpeg"}:
+                resolved_ffmpeg = shutil.which("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+            options["ffmpeg_location"] = resolved_ffmpeg or ffmpeg_path
 
         if self.settings.default_format:
             options["format"] = "bestaudio/best"
@@ -260,12 +322,50 @@ class DownloadWorker(QThread):
 
     @staticmethod
     def _classify_error_message(raw_error: str) -> str:
-        text = (raw_error or "").strip()
+        text = redact_sensitive_text((raw_error or "").strip())
         if not text:
             return "Download failed"
         lower = text.lower()
         if "download cancelled by user" in lower:
             return "Download cancelled by user"
+        if any(term in lower for term in (
+            "sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot",
+            "not a bot", "cookies are no longer valid", "authentication required",
+        )):
+            return (
+                "YouTube asked for sign-in or bot verification. Sign in to YouTube in your "
+                "default browser, then enable Settings → YouTube Authentication → Default "
+                "browser session and retry. Cookies may help, but some YouTube challenges "
+                "cannot be cleared this way."
+            )
+        if DownloadWorker._is_rate_limit_error(lower):
+            return (
+                "YouTube is rate limiting requests (HTTP 429). Wait before trying again and reduce parallel downloads. "
+                "Signing in may not clear an IP-based rate limit."
+            )
+        if "cookie" in lower and any(term in lower for term in (
+            "could not copy", "failed to decrypt", "permission denied", "database is locked",
+        )):
+            return (
+                "Muzic could not read the detected browser's YouTube session. Confirm that you "
+                "are signed in, close the browser and retry, or choose a cookies file in Settings."
+            )
+        if any(term in lower for term in (
+            "failed to load cookies", "cookie file", "cookies file",
+        )):
+            return (
+                "Muzic could not load the configured YouTube cookies. Check that the cookies "
+                "file exists and is in Netscape format, or select a signed-in browser session in Settings."
+            )
+        if any(term in lower for term in (
+            "no supported javascript runtime", "javascript runtime", "js challenge",
+            "javascript challenge", "nsig extraction failed", "signature extraction failed",
+            "challenge solving failed",
+        )):
+            return (
+                "YouTube's JavaScript challenge could not be solved. Enable Deno in Settings "
+                "for fuller extraction support, then retry."
+            )
         if "timed out after" in lower:
             return text
         if any(term in lower for term in ("connection error", "connection aborted", "timed out", "connection reset")):
@@ -286,19 +386,24 @@ class DownloadWorker(QThread):
             "connection aborted", "connection reset",
         ))
 
+    @staticmethod
+    def _is_rate_limit_error(message: Optional[str]) -> bool:
+        lower = (message or "").lower()
+        return "429" in lower or "too many requests" in lower
+
 
 class _YtDlpLogger:
     """Forward yt-dlp diagnostics to Muzic's application logger."""
 
     def debug(self, message: str) -> None:
         if message.startswith("[debug]"):
-            logger.debug(message)
+            logger.debug(redact_sensitive_text(message))
 
     def info(self, message: str) -> None:
-        logger.info(message)
+        logger.info(redact_sensitive_text(message))
 
     def warning(self, message: str) -> None:
-        logger.warning(message)
+        logger.warning(redact_sensitive_text(message))
 
     def error(self, message: str) -> None:
-        logger.error(message)
+        logger.error(redact_sensitive_text(message))

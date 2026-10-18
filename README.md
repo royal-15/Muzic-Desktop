@@ -12,7 +12,7 @@ Muzic is a PySide6 desktop app for downloading audio from YouTube videos, YouTub
 - **Quality and format controls**: Choose quality presets and MP3, M4A, FLAC, or WAV output.
 - **Playlist folders**: Save destination folders for playlists and select them from the playlist menu.
 - **Existing-file checks**: After a playlist is resolved, valid tracks already in its destination are marked completed. Missing, incomplete, or invalid tracks are downloaded again.
-- **Bundled downloader**: yt-dlp is included in the app; configure the FFmpeg executable path in Settings.
+- **Bundled downloader**: yt-dlp is included in the app; configure FFmpeg and YouTube authentication in Settings.
 
 ## Installation
 
@@ -34,6 +34,40 @@ python run.py
 ```
 
 Download FFmpeg from https://ffmpeg.org/download.html or configure its path in Settings.
+YouTube downloads work without Deno, though yt-dlp may have fewer available formats when no
+JavaScript runtime is enabled. For fuller extraction support, install Deno 2.3.0 or newer from
+https://docs.deno.com/runtime/getting_started/installation/ and leave **Use Deno when available**
+enabled in **Settings → JavaScript Runtime**. Muzic detects Deno on `PATH`; if it is not found,
+set its executable path in **Settings → Deno Path** or use **Browse…**. The pinned
+`yt-dlp[default]` dependency also installs yt-dlp's matching EJS challenge scripts, which the
+PyInstaller spec includes. Deno can be disabled in Settings and its absence never blocks a task.
+
+### YouTube authentication
+
+If YouTube asks you to sign in or confirm that you are not a bot, sign in to YouTube in your
+default browser, then open **Settings → YouTube Authentication** and choose **Default browser
+session** before retrying the failed task. Muzic detects the operating system's HTTPS browser;
+you do not need to select one. Browser access is off by default, and Muzic reads the browser's
+YouTube session only while this option is enabled. If browser detection or access fails, the
+advanced fallback is **Cookies file**, using a Netscape-format cookies file. Muzic does not save
+or log cookie values. Treat an exported cookies file like a password, keep it private, and revoke
+the session if it is exposed. yt-dlp supports browser cookie extraction and Netscape-format cookie
+files; see its
+[authentication FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+
+Cookies can help with sign-in and some verification challenges, but they do not guarantee access:
+YouTube may still require verification or restrict requests from your network. Muzic reports
+HTTP 429 separately because it usually means YouTube is rate limiting the current connection.
+Muzic pauses new extraction requests across the queue and retries up to three times with
+increasing delays when it receives HTTP 429. Requests are spaced to avoid resuming the queue in
+a burst. If YouTube continues rate limiting, wait longer before retrying and consider reducing
+**Max Parallel Downloads** in Settings. Authentication does not guarantee that an IP rate limit
+will clear.
+
+The “Missing required Visitor Data” PO Token warning can appear when a YouTube player client
+cannot mint a required playback token. Do not copy a Visitor Data value manually; yt-dlp notes
+that this workaround is unstable. A warning for one client may not prevent another client from
+working, but YouTube can still block a download or require verification.
 
 ## Usage
 

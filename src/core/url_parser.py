@@ -2,6 +2,7 @@
 import re
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from urllib.parse import parse_qs, urlparse
 
 from ..utils.validators import is_youtube_url
 
@@ -43,9 +44,22 @@ class URLParser:
         # https://www.youtube.com/playlist?list=PLAYLIST_ID
         # https://www.youtube.com/channel/CHANNEL_ID
         
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+
+        # Parse the watch query by key so reordered parameters such as
+        # `watch?feature=share&v=...` work as reliably as `watch?v=...`.
+        if parsed.path.rstrip("/").lower() == "/watch" and query.get("v"):
+            return URLInfo(
+                url=url,
+                source='youtube',
+                type='video',
+                id=query["v"][0]
+            )
+
         # Video patterns
         video_patterns = [
-            r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]+)',
+            r'(?:youtu\.be/)([a-zA-Z0-9_-]+)',
             r'youtube\.com/embed/([a-zA-Z0-9_-]+)',
         ]
         
@@ -59,14 +73,26 @@ class URLParser:
                     id=match.group(1)
                 )
         
-        # Playlist pattern
-        playlist_match = re.search(r'[?&]list=([a-zA-Z0-9_-]+)', url)
-        if playlist_match:
+        # A video shared from a playlist often carries both `v` and `list`.
+        # Treat that as the selected video; otherwise the UI sends it through
+        # playlist expansion and may download a different set of items.
+        if parsed.path.rstrip("/").lower() == "/playlist" and query.get("list"):
             return URLInfo(
                 url=url,
                 source='youtube',
                 type='playlist',
-                id=playlist_match.group(1)
+                id=query["list"][0]
+            )
+
+        # Some playlist links use a watch URL without selecting a video ID.
+        # A present `v` always means the URL points to a specific video.
+        playlist_ids = query.get("list", [])
+        if playlist_ids and not query.get("v") and parsed.path.rstrip("/").lower() == "/watch":
+            return URLInfo(
+                url=url,
+                source='youtube',
+                type='playlist',
+                id=playlist_ids[0]
             )
         
         # Channel patterns

@@ -14,15 +14,16 @@ if sys.platform not in PLATFORM_NAMES:
 PLATFORM = PLATFORM_NAMES[sys.platform]
 
 yt_dlp_datas, yt_dlp_binaries, yt_dlp_hiddenimports = collect_all('yt_dlp')
+yt_dlp_ejs_datas, yt_dlp_ejs_binaries, yt_dlp_ejs_hiddenimports = collect_all('yt_dlp_ejs')
 
 a = Analysis(
     ['run.py'],
     pathex=[],
-    binaries=yt_dlp_binaries,
+    binaries=yt_dlp_binaries + yt_dlp_ejs_binaries,
     # Python source modules are analyzed from run.py imports. Collect yt-dlp's
     # dynamic extractors and package data; FFmpeg remains an external tool.
-    datas=yt_dlp_datas + [('app-logo.ico', '.')],
-    hiddenimports=yt_dlp_hiddenimports,
+    datas=yt_dlp_datas + yt_dlp_ejs_datas + [('app-logo.ico', '.')],
+    hiddenimports=yt_dlp_hiddenimports + yt_dlp_ejs_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+import os
 
 # Application info
 APP_NAME = "Muzic"
@@ -19,7 +20,13 @@ else:
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
     APP_DIR = BASE_DIR
 
-CONFIG_FILE = APP_DIR / "config.json"
+if sys.platform == "win32":
+    USER_CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Muzic"
+elif sys.platform == "darwin":
+    USER_CONFIG_DIR = Path.home() / "Library" / "Application Support" / "Muzic"
+else:
+    USER_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "muzic"
+CONFIG_FILE = USER_CONFIG_DIR / "config.json"
 HISTORY_FILE = APP_DIR / "history.json"
 LOG_FILE = APP_DIR / "muzic.log"
 
@@ -34,6 +41,7 @@ DEFAULT_MAX_PARALLEL = 3
 DEFAULT_QUALITY = "320kbps"
 DEFAULT_FORMAT = "mp3"
 DEFAULT_THEME = "dark"
+DEFAULT_FFMPEG = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 
 # Quality options
 QUALITY_OPTIONS = ["Best", "320kbps", "256kbps", "192kbps", "128kbps"]

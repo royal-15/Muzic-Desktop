@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QComboBox, QLabel,
     QTableWidget, QTableWidgetItem, QProgressBar,
-    QFileDialog, QHeaderView, QMessageBox, QSpinBox,
+    QFileDialog, QHeaderView, QMessageBox, QSpinBox, QCheckBox,
     QDialog, QFormLayout, QDialogButtonBox, QInputDialog,
     QListWidget, QListWidgetItem, QToolButton, QMenu, QSystemTrayIcon,
-    QSizePolicy,
+    QSizePolicy, QGroupBox, QTabWidget, QScrollArea, QFrame,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QIcon, QCloseEvent, QFontMetrics
@@ -31,8 +31,9 @@ from ..config.constants import (
 from ..core.download_manager import DownloadManager
 from ..core.download_worker import DownloadTask
 from ..core.playlist_resolver import PlaylistResolver
+from ..core.ytdlp_options import detect_default_browser, deno_runtime_status
 from ..core.url_parser import URLParser
-from ..utils.validators import parse_multiple_urls, is_valid_directory, is_valid_url, is_youtube_url
+from ..utils.validators import parse_multiple_urls, is_valid_directory, is_valid_url, is_youtube_url, normalize_youtube_url
 from ..utils.logger import logger
 from .styles.theme import Theme
 
@@ -79,6 +80,29 @@ def _powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _remove_versioned_muzic_entries(directory: Path, suffix: str) -> None:
+    """Remove old version-named Muzic launchers from a user menu directory."""
+    versioned_name = re.compile(
+        rf"^muzic(?:[ _-]+v?)\d+(?:\.\d+){{1,3}}{re.escape(suffix)}$",
+        re.IGNORECASE,
+    )
+    for entry in directory.iterdir():
+        if not entry.is_file() or not versioned_name.fullmatch(entry.name):
+            continue
+
+        # A Linux desktop file must also identify itself as a Muzic application;
+        # this avoids deleting an unrelated file that happens to share the name.
+        if suffix == ".desktop":
+            try:
+                contents = entry.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if not re.search(r"(?im)^Name=Muzic(?:\s+v?\d+(?:\.\d+){1,3})?\s*$", contents):
+                continue
+
+        entry.unlink()
+
+
 def _create_desktop_entry_for_current_user() -> None:
     """Create a current-user launcher entry for the current platform."""
     if sys.platform == "win32":
@@ -121,6 +145,7 @@ def _create_windows_start_menu_entry() -> None:
         capture_output=True,
         text=True,
     )
+    _remove_versioned_muzic_entries(programs, ".lnk")
 
 
 def _create_linux_applications_entry() -> None:
@@ -151,6 +176,7 @@ def _create_linux_applications_entry() -> None:
         encoding="utf-8",
     )
     entry.chmod(0o755)
+    _remove_versioned_muzic_entries(applications, ".desktop")
 
 
 class MainWindow(QMainWindow):
@@ -177,7 +203,7 @@ class MainWindow(QMainWindow):
         self.tray_icon.show()
         
         # Initialize theme
-        self.theme = Theme(self.settings.theme)
+        self.theme = Theme("dark")
         
         # Initialize download manager
         self.download_manager = DownloadManager(self.settings, self)
@@ -228,7 +254,11 @@ class MainWindow(QMainWindow):
         candidate = Path(configured_path).expanduser()
         if candidate.is_file():
             return str(candidate.resolve())
-        return shutil.which(configured_path)
+        return shutil.which(configured_path) or (
+            shutil.which("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+            if Path(configured_path).name.lower() in {"ffmpeg.exe", "ffmpeg"}
+            else None
+        )
     
     def _setup_window(self) -> None:
         """Configure main window properties."""
@@ -255,13 +285,18 @@ class MainWindow(QMainWindow):
         title_label.setObjectName("subtitle")
         main_layout.addWidget(title_label)
         
-        # Input section
+        # Download panel
+        download_panel = QGroupBox("Download")
+        download_panel_layout = QVBoxLayout(download_panel)
+        download_panel_layout.setSpacing(8)
         input_layout = QHBoxLayout()
         input_layout.setSpacing(8)
         
         # URL/Search input
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("Paste URL or enter song name...")
+        self.url_input.setAccessibleName("URL or song search")
+        self.url_input.setToolTip("Paste a YouTube URL or enter a song name")
         self.url_input.returnPressed.connect(self._on_add_clicked)
         input_layout.addWidget(self.url_input, 3)
 
@@ -269,6 +304,7 @@ class MainWindow(QMainWindow):
         self.input_file_button.setObjectName("secondaryButton")
         self.input_file_button.clicked.connect(self._on_browse_input_file_clicked)
         self.input_file_button.setVisible(False)
+        self.input_file_button.setToolTip("Choose a text file with one URL or song name per line")
         input_layout.addWidget(self.input_file_button)
         
         # Query type selector
@@ -281,34 +317,43 @@ class MainWindow(QMainWindow):
         ])
         self.mode_combo.setCurrentIndex(0)
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        self.mode_combo.setAccessibleName("Input mode")
         input_layout.addWidget(self.mode_combo, 1)
+        download_panel_layout.addLayout(input_layout)
+
+        options_layout = QHBoxLayout()
+        options_layout.setSpacing(8)
         
         # Quality selector
         quality_label = QLabel("Quality:")
-        input_layout.addWidget(quality_label)
+        options_layout.addWidget(quality_label)
         
         self.quality_combo = QComboBox()
         self.quality_combo.addItems(QUALITY_OPTIONS)
         self.quality_combo.setCurrentText(self.settings.default_quality)
         self.quality_combo.currentTextChanged.connect(self._on_quality_changed)
-        input_layout.addWidget(self.quality_combo)
+        options_layout.addWidget(self.quality_combo)
         
         # Format selector
         format_label = QLabel("Format:")
-        input_layout.addWidget(format_label)
+        options_layout.addWidget(format_label)
         
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMAT_OPTIONS)
         self.format_combo.setCurrentText(self.settings.default_format)
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
-        input_layout.addWidget(self.format_combo)
+        options_layout.addWidget(self.format_combo)
         
         # Add button
         self.add_button = QPushButton("Add to Queue")
         self.add_button.clicked.connect(self._on_add_clicked)
-        input_layout.addWidget(self.add_button)
-        
-        main_layout.addLayout(input_layout)
+        self.add_button.setToolTip("Add downloads to the queue; available downloads start automatically")
+        self.add_button.setDefault(True)
+        options_layout.addStretch()
+        options_layout.addWidget(self.add_button)
+        download_panel_layout.addLayout(options_layout)
+
+        main_layout.addWidget(download_panel)
         
         # Queue table
         self.queue_table = QTableWidget()
@@ -316,7 +361,9 @@ class MainWindow(QMainWindow):
         self.queue_table.setHorizontalHeaderLabels([
             "ID", "Name", "URL", "Status", "Progress", "Speed", "Dest"
         ])
-        self.queue_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        queue_header = self.queue_table.horizontalHeader()
+        queue_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        queue_header.setStretchLastSection(False)
         self.queue_table.cellClicked.connect(self._on_queue_cell_clicked)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -324,6 +371,7 @@ class MainWindow(QMainWindow):
         self.queue_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.queue_table.customContextMenuRequested.connect(self._show_queue_context_menu)
         main_layout.addWidget(self.queue_table, 1)
+        QTimer.singleShot(0, self._set_default_queue_column_widths)
         
         # Bottom controls (two rows: output, playlists + queue actions)
         bottom_container = QVBoxLayout()
@@ -338,6 +386,7 @@ class MainWindow(QMainWindow):
 
         self.output_dir_input = QLineEdit()
         self.output_dir_input.setText(self.settings.output_dir)
+        self.output_dir_input.setAccessibleName("Download destination")
         output_layout.addWidget(self.output_dir_input, 2)
 
         self.browse_button = QPushButton("Browse...")
@@ -361,23 +410,20 @@ class MainWindow(QMainWindow):
         self.playlist_combo.currentIndexChanged.connect(self._on_playlist_selected)
         bottom_row_layout.addWidget(self.playlist_combo)
 
-        self.save_playlist_button = QPushButton("Save Playlist Folder")
-        self.save_playlist_button.setObjectName("secondaryButton")
-        self.save_playlist_button.clicked.connect(self._on_save_playlist_folder_clicked)
-        bottom_row_layout.addWidget(self.save_playlist_button)
-
-        self.manage_playlists_button = QPushButton("Manage...")
-        self.manage_playlists_button.setObjectName("secondaryButton")
-        self.manage_playlists_button.clicked.connect(self._on_manage_playlist_folders_clicked)
-        bottom_row_layout.addWidget(self.manage_playlists_button)
+        self.playlists_button = QToolButton()
+        self.playlists_button.setText("Playlists…")
+        self.playlists_button.setObjectName("secondaryButton")
+        playlist_menu = QMenu(self.playlists_button)
+        playlist_menu.addAction("Save Current Playlist…", self._on_save_playlist_folder_clicked)
+        playlist_menu.addAction("Manage Playlists…", self._on_manage_playlist_folders_clicked)
+        self.playlists_button.setMenu(playlist_menu)
+        self.playlists_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.playlists_button.setToolTip("Save or manage playlist folder mappings")
+        bottom_row_layout.addWidget(self.playlists_button)
 
         bottom_row_layout.addStretch()
 
         # Right section: queue controls
-        self.start_all_button = QPushButton("Start All")
-        self.start_all_button.clicked.connect(self._on_start_all_clicked)
-        bottom_row_layout.addWidget(self.start_all_button)
-
         self.cancel_all_button = QPushButton("Cancel All")
         self.cancel_all_button.setObjectName("secondaryButton")
         self.cancel_all_button.clicked.connect(self._on_cancel_all_clicked)
@@ -445,6 +491,24 @@ class MainWindow(QMainWindow):
         )
         status_bar.addPermanentWidget(self.queue_status_widget)
         self._update_stats()
+
+    def _set_default_queue_column_widths(self) -> None:
+        """Size queue columns to fill the initial viewport while keeping them resizable."""
+        viewport_width = self.queue_table.viewport().width()
+        if viewport_width <= 0:
+            return
+
+        proportions = (0.055, 0.22, 0.20, 0.11, 0.12, 0.10, 0.195)
+        minimums = (50, 145, 145, 88, 96, 86, 180)
+        widths = [
+            max(minimum, int(viewport_width * proportion))
+            for minimum, proportion in zip(minimums, proportions)
+        ]
+        if sum(widths) < viewport_width:
+            widths[-1] += viewport_width - sum(widths)
+
+        for column, width in enumerate(widths):
+            self.queue_table.setColumnWidth(column, width)
     
     def _apply_theme(self) -> None:
         """Apply theme to the application."""
@@ -478,7 +542,8 @@ class MainWindow(QMainWindow):
         
         # Update settings
         self.settings.output_dir = self.output_dir_input.text().strip() or self.settings.output_dir
-        self.settings_manager.save()
+        if not self.settings_manager.save():
+            self._show_feedback("Settings could not be saved", "error", 3500)
         
         # Process query based on mode
         queries = self._process_query(query_text, mode)
@@ -511,6 +576,7 @@ class MainWindow(QMainWindow):
             output_dir=self.settings.output_dir,
             audio_format=self.settings.default_format or "mp3",
             ffmpeg_path=self.settings.ffmpeg_path,
+            settings=self.settings,
             parent=self,
         )
         self._playlist_resolver.resolved.connect(self._on_playlists_resolved)
@@ -641,8 +707,9 @@ class MainWindow(QMainWindow):
             if not line or line in seen:
                 continue
 
-            if is_youtube_url(line):
-                query = line
+            youtube_url = normalize_youtube_url(line)
+            if youtube_url:
+                query = youtube_url
             elif is_valid_url(line):
                 continue
             else:
@@ -907,7 +974,9 @@ class MainWindow(QMainWindow):
         """Handle settings button click."""
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.settings_manager.save()
+            if not self.settings_manager.save():
+                self._show_feedback("Settings could not be saved. Check the configured values and config folder permissions.", "error", 4500)
+                return
             self.output_dir_input.setText(self.settings.output_dir)
             self._show_feedback("Settings saved", "success")
     
@@ -931,8 +1000,8 @@ class MainWindow(QMainWindow):
 
                 status_item = self.queue_table.item(row, 3)
                 if status_item:
-                    status_item.setText(task.status.capitalize())
-                    status_item.setToolTip(task.error_message or "")
+                    status_item.setText(task.status_message or task.status.capitalize())
+                    status_item.setToolTip(task.error_message or task.status_message or "")
                 
                 # Update progress bar
                 progress_bar = self.queue_table.cellWidget(row, 4)
@@ -997,7 +1066,7 @@ class MainWindow(QMainWindow):
 
     def _show_queue_context_menu(self, position) -> None:
         index = self.queue_table.indexAt(position)
-        if not index.isValid() or index.column() not in (1, 2):
+        if not index.isValid():
             return
 
         row = index.row()
@@ -1011,12 +1080,19 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if index.column() == 1:
             menu.addAction("Copy name", lambda: self._copy_to_clipboard(task.title or ""))
-        else:
+        elif index.column() == 2:
             menu.addAction("Copy URL", lambda: self._copy_to_clipboard(task.url or ""))
 
         if task.status == STATUS_FAILED:
             menu.addSeparator()
             menu.addAction("Retry", lambda task_id=task.id: self._retry_task(task_id))
+        elif task.status in (STATUS_QUEUED, STATUS_DOWNLOADING):
+            menu.addSeparator()
+            menu.addAction("Cancel download", lambda task_id=task.id: self.download_manager.cancel_task(task_id))
+
+        if task.output_dir:
+            menu.addSeparator()
+            menu.addAction("Open destination", lambda path=task.output_dir: self._open_destination(path))
 
         menu.exec(self.queue_table.viewport().mapToGlobal(position))
 
@@ -1074,7 +1150,10 @@ class MainWindow(QMainWindow):
         task = self.download_manager.get_task(int(id_item.text()))
         if not task or not task.output_dir:
             return
-        destination = Path(task.output_dir).expanduser()
+        self._open_destination(task.output_dir)
+
+    def _open_destination(self, path: str) -> None:
+        destination = Path(path).expanduser()
         try:
             destination.mkdir(parents=True, exist_ok=True)
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(destination.resolve()))):
@@ -1157,7 +1236,7 @@ class MainWindow(QMainWindow):
         self.settings_manager.save()
         
         # Cancel all downloads
-        self.download_manager.cancel_all()
+        self.download_manager.shutdown()
         
         logger.info("Application closed")
         event.accept()
@@ -1170,38 +1249,201 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(500)
+        self.setMinimumSize(640, 620)
+        self.resize(700, 660)
         self._setup_ui()
     
     def _setup_ui(self) -> None:
-        """Setup dialog UI."""
-        layout = QFormLayout(self)
-        
-        # Max parallel downloads
+        """Build a focused settings dialog with grouped, discoverable controls."""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(16)
+
+        title = QLabel("Settings")
+        title.setObjectName("title")
+        title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        layout.addWidget(title)
+        description = QLabel("Manage downloads, optional YouTube access, and local tools.")
+        description.setObjectName("caption")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        layout.addWidget(self.tabs, 1)
+
+        general_content = QWidget()
+        general_tab = QScrollArea()
+        general_tab.setWidgetResizable(True)
+        general_tab.setFrameShape(QFrame.Shape.NoFrame)
+        general_tab.setWidget(general_content)
+        general_layout = QVBoxLayout(general_content)
+        general_layout.setContentsMargins(18, 18, 18, 18)
+        general_layout.setSpacing(16)
+
+        download_group = QGroupBox("Download behavior")
+        download_form = QFormLayout(download_group)
+        download_form.setContentsMargins(16, 22, 16, 16)
+        download_form.setHorizontalSpacing(18)
+        download_form.setVerticalSpacing(12)
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 10)
         self.parallel_spin.setValue(self.settings.max_parallel_downloads)
-        layout.addRow("Max Parallel Downloads:", self.parallel_spin)
+        self.parallel_spin.setMinimumHeight(44)
+        self.parallel_spin.setToolTip("Number of downloads that may run at the same time.")
+        download_form.addRow("Max parallel downloads", self.parallel_spin)
+
+        tool_group = QGroupBox("Audio tools")
+        tool_form = QFormLayout(tool_group)
+        tool_form.setContentsMargins(16, 22, 16, 16)
+        tool_form.setHorizontalSpacing(18)
+        tool_form.setVerticalSpacing(12)
         
         self.ffmpeg_input = QLineEdit(self.settings.ffmpeg_path)
+        self.ffmpeg_input.setMinimumHeight(44)
+        self.ffmpeg_input.setPlaceholderText("ffmpeg on PATH, or full executable path")
+        self.ffmpeg_input.setAccessibleName("FFmpeg executable path")
         ffmpeg_row = QHBoxLayout()
         ffmpeg_row.addWidget(self.ffmpeg_input)
         self.ffmpeg_browse_button = QPushButton("Browse…")
+        self.ffmpeg_browse_button.setObjectName("secondaryButton")
         self.ffmpeg_browse_button.clicked.connect(self._browse_ffmpeg)
         ffmpeg_row.addWidget(self.ffmpeg_browse_button)
-        layout.addRow("FFmpeg Path:", ffmpeg_row)
+        tool_form.addRow("FFmpeg path", ffmpeg_row)
 
         self.desktop_entry_button = QPushButton("Add Desktop Entry")
+        self.desktop_entry_button.setObjectName("secondaryButton")
+        self.desktop_entry_button.setToolTip("Add Muzic to your system applications menu.")
         self.desktop_entry_button.clicked.connect(self._add_desktop_entry)
-        layout.addRow("Launcher:", self.desktop_entry_button)
+        tool_form.addRow("Application launcher", self.desktop_entry_button)
+
+        general_layout.addWidget(download_group)
+        general_layout.addWidget(tool_group)
+        general_layout.addStretch(1)
+        self.tabs.addTab(general_tab, "General")
+
+        services_content = QWidget()
+        services_tab = QScrollArea()
+        services_tab.setWidgetResizable(True)
+        services_tab.setFrameShape(QFrame.Shape.NoFrame)
+        services_tab.setWidget(services_content)
+        services_layout = QVBoxLayout(services_content)
+        services_layout.setContentsMargins(18, 18, 18, 18)
+        services_layout.setSpacing(16)
+
+        auth_group = QGroupBox("YouTube access")
+        auth_form = QFormLayout(auth_group)
+        auth_form.setContentsMargins(16, 22, 16, 16)
+        auth_form.setHorizontalSpacing(18)
+        auth_form.setVerticalSpacing(10)
+
+        auth_intro = QLabel(
+            "Authentication is off by default. Turn it on only if YouTube requires a signed-in session."
+        )
+        auth_intro.setObjectName("caption")
+        auth_intro.setWordWrap(True)
+        auth_form.addRow("", auth_intro)
+
+        self.youtube_auth_combo = QComboBox()
+        self.youtube_auth_combo.addItem("Off (recommended)", "none")
+        self.youtube_auth_combo.addItem("Default browser session", "browser")
+        self.youtube_auth_combo.addItem("Cookies file (advanced)", "file")
+        auth_index = self.youtube_auth_combo.findData(
+            getattr(self.settings, "youtube_auth_mode", "none")
+        )
+        self.youtube_auth_combo.setCurrentIndex(max(0, auth_index))
+        self.youtube_auth_combo.setMinimumHeight(44)
+        self.youtube_auth_combo.currentIndexChanged.connect(self._update_auth_controls)
+        auth_form.addRow("Authentication", self.youtube_auth_combo)
+
+        detected_browser = detect_default_browser()
+        if detected_browser:
+            self.default_browser_info = QLabel(
+                f"Detected default browser: {detected_browser.title()}. "
+                "Muzic will read its YouTube session only while this option is enabled."
+            )
+        else:
+            self.default_browser_info = QLabel(
+                "Muzic could not identify a supported default browser. Set a supported browser "
+                "as the system default or use a cookies file."
+            )
+        self.default_browser_info.setWordWrap(True)
+        auth_form.addRow("", self.default_browser_info)
+
+        self.youtube_sign_in_button = QPushButton("Open YouTube in Default Browser")
+        self.youtube_sign_in_button.setObjectName("secondaryButton")
+        self.youtube_sign_in_button.clicked.connect(self._open_youtube_sign_in)
+        auth_form.addRow("", self.youtube_sign_in_button)
+
+        self.auth_privacy_note = QLabel(
+            "First sign in to YouTube in the browser. With this option enabled, yt-dlp reads "
+            "that browser's YouTube session for extraction. Muzic does not save or log cookie values. "
+            "YouTube may still require verification or block requests."
+        )
+        self.auth_privacy_note.setWordWrap(True)
+        self.auth_privacy_note.setObjectName("caption")
+        auth_form.addRow("", self.auth_privacy_note)
+
+        cookie_row = QHBoxLayout()
+        self.youtube_cookies_input = QLineEdit(
+            getattr(self.settings, "youtube_cookies_file", "")
+        )
+        self.youtube_cookies_input.setMinimumHeight(44)
+        self.youtube_cookies_input.setPlaceholderText("Netscape-format cookies file")
+        self.youtube_cookies_input.setAccessibleName("YouTube cookies file path")
+        cookie_row.addWidget(self.youtube_cookies_input)
+        self.youtube_cookies_browse_button = QPushButton("Browse…")
+        self.youtube_cookies_browse_button.setObjectName("secondaryButton")
+        self.youtube_cookies_browse_button.clicked.connect(self._browse_cookies)
+        cookie_row.addWidget(self.youtube_cookies_browse_button)
+        auth_form.addRow("Cookies file", cookie_row)
+
+        runtime_group = QGroupBox("JavaScript runtime")
+        runtime_form = QFormLayout(runtime_group)
+        runtime_form.setContentsMargins(16, 22, 16, 16)
+        runtime_form.setHorizontalSpacing(18)
+        runtime_form.setVerticalSpacing(10)
+
+        self.use_deno_checkbox = QCheckBox("Use Deno when available")
+        self.use_deno_checkbox.setChecked(
+            getattr(self.settings, "use_deno_runtime", False)
+        )
+        self.use_deno_checkbox.stateChanged.connect(self._update_deno_controls)
+        runtime_form.addRow("Optional support", self.use_deno_checkbox)
+
+        self.deno_input = QLineEdit(getattr(self.settings, "deno_path", ""))
+        self.deno_input.setMinimumHeight(44)
+        self.deno_input.setPlaceholderText("deno on PATH, or full executable path")
+        self.deno_input.setAccessibleName("Deno executable path")
+        self.deno_input.editingFinished.connect(self._refresh_deno_status)
+        deno_row = QHBoxLayout()
+        deno_row.addWidget(self.deno_input)
+        self.deno_browse_button = QPushButton("Browse…")
+        self.deno_browse_button.setObjectName("secondaryButton")
+        self.deno_browse_button.clicked.connect(self._browse_deno)
+        deno_row.addWidget(self.deno_browse_button)
+        runtime_form.addRow("Deno path", deno_row)
+
+        self.deno_status_label = QLabel()
+        self.deno_status_label.setWordWrap(True)
+        runtime_form.addRow("Status", self.deno_status_label)
+
+        services_layout.addWidget(auth_group)
+        services_layout.addWidget(runtime_group)
+        services_layout.addStretch(1)
+        self.tabs.addTab(services_tab, "YouTube & Runtime")
+
+        self._update_auth_controls()
+        self._update_deno_controls()
         
-        # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Save")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        layout.addWidget(buttons)
 
     def _browse_ffmpeg(self) -> None:
         """Choose an FFmpeg executable for the configured path."""
@@ -1216,6 +1458,78 @@ class SettingsDialog(QDialog):
         )
         if file_path:
             self.ffmpeg_input.setText(file_path)
+
+    def _browse_cookies(self) -> None:
+        current = self.youtube_cookies_input.text().strip()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select YouTube Cookies File",
+            str(Path(current).expanduser().parent) if current else str(Path.home()),
+            "Cookies files (*.txt *.cookies);;All files (*)",
+        )
+        if file_path:
+            self.youtube_cookies_input.setText(file_path)
+
+    def _browse_deno(self) -> None:
+        """Choose the Deno executable used by yt-dlp."""
+        current = Path(self.deno_input.text()).expanduser() if self.deno_input.text().strip() else Path.home()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Deno Executable",
+            str(current if current.is_dir() else current.parent),
+            "Deno executable (deno, deno.exe);;All files (*)",
+        )
+        if file_path:
+            self.deno_input.setText(file_path)
+            self._refresh_deno_status()
+
+    def _refresh_deno_status(self, *_args) -> None:
+        """Show Deno status while making clear that it is optional."""
+        if not self.use_deno_checkbox.isChecked():
+            message = "Deno is disabled. Downloads will continue without a JavaScript runtime."
+            self.deno_status_label.setText(message)
+            self.deno_status_label.setStyleSheet("color: #B3B3B3;")
+            self.deno_status_label.setToolTip(message)
+            return
+
+        executable, version, error = deno_runtime_status(
+            self.settings,
+            deno_path=self.deno_input.text(),
+        )
+        if error:
+            message = f"{error} Downloads will continue without Deno; some YouTube formats may be unavailable."
+            self.deno_status_label.setText(message)
+            self.deno_status_label.setStyleSheet("color: #FFA726;")
+            self.deno_status_label.setToolTip(message)
+            return
+
+        status = f"Deno {version} is ready."
+        self.deno_status_label.setText(status)
+        self.deno_status_label.setStyleSheet("color: #22C55E;")
+        self.deno_status_label.setToolTip(executable)
+
+    def _update_deno_controls(self, *_args) -> None:
+        enabled = self.use_deno_checkbox.isChecked()
+        self.deno_input.setEnabled(enabled)
+        self.deno_browse_button.setEnabled(enabled)
+        self._refresh_deno_status()
+
+    def _update_auth_controls(self, *_args) -> None:
+        mode = self.youtube_auth_combo.currentData()
+        self.default_browser_info.setVisible(mode == "browser")
+        self.youtube_sign_in_button.setVisible(mode == "browser")
+        self.auth_privacy_note.setVisible(mode == "browser")
+        self.youtube_cookies_input.setEnabled(mode == "file")
+        self.youtube_cookies_browse_button.setEnabled(mode == "file")
+
+    def _open_youtube_sign_in(self) -> None:
+        """Open YouTube in the OS default browser so the user can sign in there."""
+        if not QDesktopServices.openUrl(QUrl("https://music.youtube.com/")):
+            QMessageBox.warning(
+                self,
+                "Could Not Open Browser",
+                "Open YouTube Music in your default browser, sign in, then retry the download.",
+            )
 
     def _add_desktop_entry(self) -> None:
         """Create a current-user launcher entry for the current platform."""
@@ -1234,7 +1548,16 @@ class SettingsDialog(QDialog):
     def accept(self) -> None:
         """Save settings and close."""
         self.settings.max_parallel_downloads = self.parallel_spin.value()
-        self.settings.ffmpeg_path = self.ffmpeg_input.text().strip() or "ffmpeg.exe"
+        self.settings.ffmpeg_path = self.ffmpeg_input.text().strip() or ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        self.settings.youtube_auth_mode = self.youtube_auth_combo.currentData()
+        self.settings.youtube_cookies_file = self.youtube_cookies_input.text().strip()
+        self.settings.deno_path = self.deno_input.text().strip()
+        self.settings.use_deno_runtime = self.use_deno_checkbox.isChecked()
+
+        valid, errors = self.settings.validate()
+        if not valid:
+            QMessageBox.warning(self, "Invalid Settings", "\n".join(errors))
+            return
 
         super().accept()
 

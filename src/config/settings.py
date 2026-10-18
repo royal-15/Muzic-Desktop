@@ -1,16 +1,20 @@
 """Configuration management with JSON persistence."""
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field, fields, asdict
 
 from .constants import (
     CONFIG_FILE,
+    APP_DIR,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_MAX_PARALLEL,
     DEFAULT_QUALITY,
     DEFAULT_FORMAT,
     DEFAULT_THEME,
+    DEFAULT_FFMPEG,
 )
 
 
@@ -38,7 +42,16 @@ class AppSettings:
     # Tool paths
     # Retained so older config.json files still load; yt-dlp is bundled now.
     yt_dlp_path: str = field(default="yt-dlp")
-    ffmpeg_path: str = field(default="ffmpeg.exe")
+    ffmpeg_path: str = field(default=DEFAULT_FFMPEG)
+    deno_path: str = field(default="")
+    # Use Deno for fuller YouTube challenge support when it is available.
+    use_deno_runtime: bool = field(default=False)
+
+    # YouTube authentication metadata only; cookie values are never stored here.
+    youtube_auth_mode: str = field(default="none")
+    # Retained for old config files; browser mode now detects the OS default.
+    youtube_browser: str = field(default="chrome")
+    youtube_cookies_file: str = field(default="")
     
     # UI preferences
     window_width: int = field(default=1000)
@@ -60,6 +73,10 @@ class AppSettings:
     def load(cls, path: Optional[Path] = None) -> "AppSettings":
         """Load settings from JSON and ignore settings from older releases."""
         config_path = path or CONFIG_FILE
+        if path is None and not config_path.exists():
+            legacy_path = APP_DIR / "config.json"
+            if legacy_path.is_file():
+                config_path = legacy_path
         
         if not config_path.exists():
             return cls()
@@ -88,8 +105,19 @@ class AppSettings:
             # Ensure parent directory exists
             config_path.parent.mkdir(parents=True, exist_ok=True)
             
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(asdict(self), f, indent=2)
+            valid, _ = self.validate()
+            if not valid:
+                return False
+            fd, temporary_path = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=config_path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(asdict(self), f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary_path, config_path)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
             return True
         except (OSError, IOError) as e:
             print(f"Failed to save settings: {e}")
@@ -106,24 +134,39 @@ class AppSettings:
         errors = []
         
         # Validate output directory
-        if not self.output_dir:
+        if not isinstance(self.output_dir, str) or not self.output_dir.strip():
             errors.append("Output directory cannot be empty")
+        if not isinstance(self.default_quality, str) or self.default_quality not in {"Best", "320kbps", "256kbps", "192kbps", "128kbps"}:
+            errors.append("Choose a supported audio quality")
+        if not isinstance(self.default_format, str) or self.default_format not in {"mp3", "m4a", "flac", "wav"}:
+            errors.append("Choose a supported audio format")
+        if not isinstance(self.playlist_folders, dict) or not isinstance(self.playlist_urls, dict):
+            errors.append("Playlist mappings must be valid name and path mappings")
         
         # Validate parallel downloads
-        if self.max_parallel_downloads < 1 or self.max_parallel_downloads > 10:
+        if not isinstance(self.max_parallel_downloads, int) or isinstance(self.max_parallel_downloads, bool) or not 1 <= self.max_parallel_downloads <= 10:
             errors.append("Max parallel downloads must be between 1 and 10")
         
         # Validate retry attempts
-        if self.retry_attempts < 0 or self.retry_attempts > 10:
+        if not isinstance(self.retry_attempts, int) or isinstance(self.retry_attempts, bool) or not 0 <= self.retry_attempts <= 10:
             errors.append("Retry attempts must be between 0 and 10")
         
         # Validate timeout
-        if self.timeout_seconds < 30 or self.timeout_seconds > 3600:
+        if not isinstance(self.timeout_seconds, int) or isinstance(self.timeout_seconds, bool) or not 30 <= self.timeout_seconds <= 3600:
             errors.append("Timeout must be between 30 and 3600 seconds")
-        
-        # Validate proxy URL if enabled
-        if self.use_proxy and not self.proxy_url:
-            errors.append("Proxy URL is required when proxy is enabled")
+
+        if not isinstance(self.ffmpeg_path, str):
+            errors.append("FFmpeg path must be text")
+        if self.youtube_auth_mode not in {"none", "browser", "file"}:
+            errors.append("Choose a supported YouTube authentication source")
+        if not isinstance(self.youtube_browser, str) or not isinstance(self.youtube_cookies_file, str):
+            errors.append("YouTube authentication settings must be text")
+        elif self.youtube_auth_mode == "file" and not self.youtube_cookies_file.strip():
+            errors.append("Choose a Netscape-format YouTube cookies file")
+        if not isinstance(self.deno_path, str):
+            errors.append("Deno path must be text")
+        if not isinstance(self.use_deno_runtime, bool):
+            errors.append("JavaScript runtime preference must be a boolean")
         
         return (len(errors) == 0, errors)
     

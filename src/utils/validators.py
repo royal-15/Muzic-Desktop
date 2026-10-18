@@ -2,7 +2,7 @@
 import re
 from pathlib import Path
 from typing import Tuple
-from ..config.constants import YOUTUBE_PATTERNS
+from urllib.parse import urlsplit
 
 
 def is_valid_url(url: str) -> bool:
@@ -25,11 +25,35 @@ def is_youtube_url(url: str) -> bool:
     """Check if URL is a YouTube URL."""
     if not url:
         return False
-    
-    for pattern in YOUTUBE_PATTERNS:
-        if re.match(pattern, url, re.IGNORECASE):
-            return True
-    return False
+
+    # Clipboard and text-file input can contain invisible Unicode marks (for
+    # example a BOM) or punctuation copied around a link. Validate the parsed
+    # host instead of relying on a prefix regex, which can accept lookalike
+    # hosts and rejects otherwise valid YouTube subdomains.
+    candidate = _clean_url_candidate(url)
+    try:
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def _clean_url_candidate(value: str) -> str:
+    """Remove common clipboard wrappers without changing URL query contents."""
+    candidate = value.strip().lstrip("\ufeff\u200b\u200e\u200f")
+    candidate = candidate.strip()
+    if len(candidate) >= 2 and candidate[0] in "<(['\"" and candidate[-1] in ">)]'\"":
+        candidate = candidate[1:-1].strip()
+    return candidate.rstrip(".,;!?\u3002")
+
+
+def normalize_youtube_url(url: str) -> str:
+    """Return a cleaned YouTube URL, or an empty string when it is not one."""
+    candidate = _clean_url_candidate(url)
+    return candidate if is_youtube_url(candidate) else ""
 
 
 def detect_url_type(url: str) -> str:
@@ -132,20 +156,17 @@ def parse_multiple_urls(text: str) -> list[str]:
     Returns:
         List of unique valid URLs
     """
-    # Split by common separators
-    separators = ['\n', ',', ';', ' ']
-    urls = [text]
-    
-    for sep in separators:
-        urls = [url.strip() for chunk in urls for url in chunk.split(sep)]
+    # Windows clipboard input can carry BOMs and punctuation around a URL.
+    # Tokenize on separators while leaving URL query strings intact.
+    urls = re.split(r"[\s,;]+", text.lstrip("\ufeff\u200b\u200e\u200f"))
     
     # Filter valid URLs and remove duplicates while preserving order
     seen = set()
     valid_urls = []
     
     for url in urls:
-        url = url.strip()
-        if url and url not in seen and is_youtube_url(url):
+        url = normalize_youtube_url(url)
+        if url and url not in seen:
             seen.add(url)
             valid_urls.append(url)
     

@@ -1,4 +1,4 @@
 PySide6==6.11.2
 mutagen==1.48.1
-yt-dlp==2026.8.19
+yt-dlp[default]==2026.8.19
 requests==2.34.2

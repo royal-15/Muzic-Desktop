@@ -7,6 +7,7 @@ from ..config.settings import AppSettings
 from ..config.constants import STATUS_QUEUED, STATUS_DOWNLOADING, STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED
 from ..utils.logger import logger
 from .download_worker import DownloadWorker, DownloadTask
+from .rate_limit import RateLimitCoordinator
 
 
 class DownloadManager(QObject):
@@ -24,6 +25,8 @@ class DownloadManager(QObject):
         self.settings = settings
         self._tasks: Dict[int, DownloadTask] = {}
         self._workers: Dict[int, DownloadWorker] = {}
+        self._rate_limit_coordinator = RateLimitCoordinator()
+        self._remove_when_finished: set[int] = set()
         self._next_task_id = 1
     
     def add_task(self, url: str) -> DownloadTask:
@@ -149,9 +152,11 @@ class DownloadManager(QObject):
             self.queue_changed.emit()
     
     def clear_all(self) -> None:
-        """Clear all tasks from the queue."""
+        """Cancel active work and remove every task that has no live worker."""
         self.cancel_all()
-        self._tasks.clear()
+        active_ids = set(self._workers)
+        self._remove_when_finished.update(active_ids)
+        self._tasks = {task_id: task for task_id, task in self._tasks.items() if task_id in active_ids}
         logger.info("Cleared all tasks")
         self.queue_changed.emit()
     
@@ -212,7 +217,12 @@ class DownloadManager(QObject):
         task.progress = 0
         
         # Create worker
-        worker = DownloadWorker(task, self.settings, self)
+        worker = DownloadWorker(
+            task,
+            self.settings,
+            self,
+            rate_limit_coordinator=self._rate_limit_coordinator,
+        )
         self._workers[task.id] = worker
         
         # Connect signals
@@ -221,6 +231,9 @@ class DownloadManager(QObject):
         )
         worker.title_updated.connect(
             lambda title, t=task: self._on_task_title(t, title)
+        )
+        worker.status_changed.connect(
+            lambda message, t=task: self._on_task_status(t, message)
         )
         worker.finished.connect(
             lambda status, output, error, t=task: self._on_task_finished(t, status, output, error)
@@ -242,6 +255,12 @@ class DownloadManager(QObject):
     def _on_task_title(self, task: DownloadTask, title: str) -> None:
         task.title = title
         self.task_updated.emit(task)
+
+    def _on_task_status(self, task: DownloadTask, message: str) -> None:
+        task.status_message = (
+            message if message.startswith("Waiting for YouTube rate limit cooldown") else ""
+        )
+        self.task_updated.emit(task)
     
     def _on_task_finished(self, task: DownloadTask, status: str, output_file: str, error_message: str) -> None:
         """Handle task completion."""
@@ -252,6 +271,7 @@ class DownloadManager(QObject):
         
         # Update task
         task.status = status
+        task.status_message = ""
         task.output_file = output_file if output_file else None
         task.error_message = error_message if error_message else None
         
@@ -265,6 +285,12 @@ class DownloadManager(QObject):
         
         self.task_updated.emit(task)
         self.queue_changed.emit()
+
+        if task.id in self._remove_when_finished:
+            self._remove_when_finished.discard(task.id)
+            self._tasks.pop(task.id, None)
+            self.queue_changed.emit()
+            return
         
         # Try to start next task
         self._try_start_next_task()
@@ -276,15 +302,16 @@ class DownloadManager(QObject):
             running_count = len(self._workers)
             if running_count >= self.settings.max_parallel_downloads:
                 break
-            
+
             # Find next queued task
-            next_task = None
-            for task in self._tasks.values():
-                if task.status == STATUS_QUEUED:
-                    next_task = task
-                    break
-            
+            next_task = next((task for task in self._tasks.values() if task.status == STATUS_QUEUED), None)
             if next_task:
                 self._start_task(next_task)
             else:
                 break
+
+    def shutdown(self) -> None:
+        """Request cancellation and wait for workers before their owner is destroyed."""
+        self.cancel_all()
+        for worker in list(self._workers.values()):
+            worker.wait()

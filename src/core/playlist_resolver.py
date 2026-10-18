@@ -10,6 +10,13 @@ from PySide6.QtCore import QThread, Signal
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from .download_worker import DownloadWorker
+from .ytdlp_options import (
+    authentication_options,
+    javascript_runtime_options,
+    redact_sensitive_text,
+)
+
 
 @dataclass
 class PlaylistResolution:
@@ -27,12 +34,13 @@ class PlaylistResolver(QThread):
 
     resolved = Signal(object)
 
-    def __init__(self, queries: list[str], timeout_seconds: int = 300, output_dir: str = "", audio_format: str = "mp3", ffmpeg_path: str = "", parent=None):
+    def __init__(self, queries: list[str], timeout_seconds: int = 300, output_dir: str = "", audio_format: str = "mp3", ffmpeg_path: str = "", settings=None, parent=None):
         super().__init__(parent)
         self.queries = queries
         self.output_dir = output_dir
         self.audio_format = audio_format
         self.ffmpeg_path = ffmpeg_path
+        self.settings = settings
         try:
             self.timeout_seconds = max(30, min(int(timeout_seconds or 300), 3600))
         except (TypeError, ValueError):
@@ -74,18 +82,39 @@ class PlaylistResolver(QThread):
             "socket_timeout": self.timeout_seconds,
             "progress_hooks": [self._check_interruption],
         }
-        try:
-            with YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except DownloadError as error:
-            message = str(error).strip()
-            if self.isInterruptionRequested():
-                message = "Playlist resolution cancelled"
-            elif "timed out" in message.lower():
-                message = "Playlist resolution timed out"
-            return PlaylistResolution(url, [], message or "Could not resolve playlist")
-        except Exception as error:
-            return PlaylistResolution(url, [], f"Could not resolve playlist: {error}")
+        for attempt in range(2):
+            try:
+                if self.settings is not None:
+                    options.update(javascript_runtime_options(self.settings))
+                    options.update(authentication_options(self.settings))
+                with YoutubeDL(options) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                break
+            except DownloadError as error:
+                raw_message = redact_sensitive_text(str(error).strip())
+                if (
+                    attempt == 0
+                    and DownloadWorker._is_rate_limit_error(raw_message)
+                    and time.monotonic() + 60 < self._deadline
+                ):
+                    wait_deadline = time.monotonic() + 60
+                    while time.monotonic() < wait_deadline:
+                        if self.isInterruptionRequested():
+                            return PlaylistResolution(url, [], "Playlist resolution cancelled")
+                        time.sleep(min(0.2, wait_deadline - time.monotonic()))
+                    continue
+
+                message = DownloadWorker._classify_error_message(raw_message)
+                if self.isInterruptionRequested():
+                    message = "Playlist resolution cancelled"
+                elif "timed out" in raw_message.lower():
+                    message = "Playlist resolution timed out"
+                return PlaylistResolution(url, [], message or "Could not resolve playlist")
+            except Exception as error:
+                message = DownloadWorker._classify_error_message(
+                    redact_sensitive_text(str(error))
+                )
+                return PlaylistResolution(url, [], message)
 
         if isinstance(info, dict):
             entries = info.get("entries")
