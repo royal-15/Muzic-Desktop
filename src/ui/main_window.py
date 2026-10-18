@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QProgressBar,
     QFileDialog, QHeaderView, QMessageBox, QSpinBox,
     QDialog, QFormLayout, QDialogButtonBox, QInputDialog,
-    QListWidget, QListWidgetItem, QToolButton, QMenu
+    QListWidget, QListWidgetItem, QToolButton, QMenu, QSystemTrayIcon,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QIcon, QCloseEvent
+from PySide6.QtGui import QIcon, QCloseEvent, QFontMetrics
 from PySide6.QtGui import QDesktopServices
 
 from ..config.settings import SettingsManager
@@ -25,7 +26,7 @@ from ..config.constants import (
     WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT,
     QUALITY_OPTIONS, FORMAT_OPTIONS,
     STATUS_QUEUED, STATUS_DOWNLOADING, STATUS_COMPLETED, STATUS_FAILED,
-    LOGO_PATH,
+    STATUS_CANCELLED, LOGO_PATH,
 )
 from ..core.download_manager import DownloadManager
 from ..core.download_worker import DownloadTask
@@ -34,7 +35,35 @@ from ..core.url_parser import URLParser
 from ..utils.validators import parse_multiple_urls, is_valid_directory, is_valid_url, is_youtube_url
 from ..utils.logger import logger
 from .styles.theme import Theme
-from .components.toast import Toast
+
+
+class _ElidingLabel(QLabel):
+    """Single-line label that keeps its full message available as a tooltip."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def set_message(self, message: str) -> None:
+        self._full_text = message
+        self.setToolTip(message)
+        self.setAccessibleDescription(message)
+        self._update_elided_text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_elided_text()
+
+    def _update_elided_text(self) -> None:
+        metrics = QFontMetrics(self.font())
+        available_width = max(0, self.contentsRect().width())
+        QLabel.setText(
+            self,
+            metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight, available_width),
+        )
 
 
 def _desktop_entry_escape(value: str) -> str:
@@ -140,6 +169,12 @@ class MainWindow(QMainWindow):
             app = QApplication.instance()
             if app:
                 app.setWindowIcon(app_icon)
+
+        self.tray_icon = QSystemTrayIcon(self)
+        if LOGO_PATH.is_file():
+            self.tray_icon.setIcon(QIcon(str(LOGO_PATH)))
+        self.tray_icon.setToolTip(APP_NAME)
+        self.tray_icon.show()
         
         # Initialize theme
         self.theme = Theme(self.settings.theme)
@@ -148,6 +183,8 @@ class MainWindow(QMainWindow):
         self.download_manager = DownloadManager(self.settings, self)
         self._playlist_resolver: PlaylistResolver | None = None
         self._closing = False
+        self._playlist_resolution_active = False
+        self._status_message_generation = 0
         
         # Setup UI
         self._setup_window()
@@ -284,6 +321,8 @@ class MainWindow(QMainWindow):
         self.queue_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.queue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.queue_table.setAlternatingRowColors(True)
+        self.queue_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.queue_table.customContextMenuRequested.connect(self._show_queue_context_menu)
         main_layout.addWidget(self.queue_table, 1)
         
         # Bottom controls (two rows: output, playlists + queue actions)
@@ -374,8 +413,38 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(bottom_container)
         
-        # Status bar
-        self.statusBar().showMessage("Ready")
+        # Keep messages flexible on the left and queue counts anchored on the right.
+        status_bar = self.statusBar()
+        status_bar.setSizeGripEnabled(False)
+        self.status_message_label = _ElidingLabel(self)
+        self.status_message_label.setObjectName("statusMessage")
+        self.status_message_label.set_message("Ready")
+        status_bar.addWidget(self.status_message_label, 1)
+
+        self.queue_status_widget = QWidget(self)
+        self.queue_status_widget.setObjectName("queueStatusCounts")
+        counts_layout = QHBoxLayout(self.queue_status_widget)
+        counts_layout.setContentsMargins(8, 0, 8, 0)
+        counts_layout.setSpacing(10)
+        self._queue_count_labels = {}
+        for key, label in (
+            ("queued", "Pending"),
+            ("downloading", "Downloading"),
+            ("completed", "Completed"),
+            ("failed", "Failed"),
+            ("cancelled", "Cancelled"),
+        ):
+            count_label = QLabel(f"{label} 0", self.queue_status_widget)
+            count_label.setObjectName("queueCountFailed" if key == "failed" else "queueCount")
+            count_label.setToolTip(f"{label} downloads")
+            count_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            self._queue_count_labels[key] = (label, count_label)
+            counts_layout.addWidget(count_label)
+        self.queue_status_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
+        status_bar.addPermanentWidget(self.queue_status_widget)
+        self._update_stats()
     
     def _apply_theme(self) -> None:
         """Apply theme to the application."""
@@ -394,7 +463,7 @@ class MainWindow(QMainWindow):
     def _on_add_clicked(self) -> None:
         """Handle add button click."""
         if self._playlist_resolver and self._playlist_resolver.isRunning():
-            Toast.show_message(self, "Please wait for playlist resolution to finish", "info", 2500)
+            self._show_feedback("Please wait for playlist resolution to finish", "info", 2500)
             return
 
         query_text = self.url_input.text().strip()
@@ -402,9 +471,9 @@ class MainWindow(QMainWindow):
         
         if not query_text:
             if mode == "From .txt":
-                Toast.show_message(self, "Please select a .txt file", "warning")
+                self._show_feedback("Please select a .txt file", "warning")
             else:
-                Toast.show_message(self, "Please enter a URL or search query", "warning")
+                self._show_feedback("Please enter a URL or search query", "warning")
             return
         
         # Update settings
@@ -415,7 +484,7 @@ class MainWindow(QMainWindow):
         queries = self._process_query(query_text, mode)
         
         if not queries:
-            Toast.show_message(self, "No valid URLs or queries found", "error")
+            self._show_feedback("No valid URLs or queries found", "error")
             return
         
         playlist_urls = [query for query in queries if URLParser.is_playlist(query)]
@@ -423,23 +492,26 @@ class MainWindow(QMainWindow):
             self._resolve_playlists(queries, mode == "From .txt")
         else:
             self.download_manager.add_tasks(queries)
-            Toast.show_message(self, f"Added {len(queries)} download(s) to queue", "success")
+            self._show_feedback(f"Added {len(queries)} download(s) to queue", "success")
 
         # Clear input after the submission has been accepted.
         self.url_input.clear()
 
     def _resolve_playlists(self, queries: list[str], from_txt: bool) -> None:
         """Expand playlist URLs before adding individual tasks to the queue."""
-        if from_txt:
-            Toast.show_message(self, "Resolving playlist URLs from text file...", "info", 4000)
-        else:
-            Toast.show_message(self, "Resolving playlist songs...", "info", 3000)
+        self._playlist_resolution_active = True
+        self._set_status_message(
+            "Resolving playlist URLs from text file…" if from_txt else "Resolving playlist songs…"
+        )
 
         self.add_button.setEnabled(False)
         self._playlist_resolver = PlaylistResolver(
             queries,
             getattr(self.settings, "timeout_seconds", 300),
-            self,
+            output_dir=self.settings.output_dir,
+            audio_format=self.settings.default_format or "mp3",
+            ffmpeg_path=self.settings.ffmpeg_path,
+            parent=self,
         )
         self._playlist_resolver.resolved.connect(self._on_playlists_resolved)
         self._playlist_resolver.finished.connect(self._on_playlist_resolver_finished)
@@ -450,15 +522,25 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         queries_to_queue = []
+        completed_items = []
+        unresolved_count = 0
         for original, resolution in results:
             if resolution is None:
                 queries_to_queue.append(original)
                 continue
 
             if resolution.video_urls:
-                queries_to_queue.extend(resolution.video_urls)
+                titles = resolution.video_titles or []
+                for index, video_url in enumerate(resolution.video_urls):
+                    title = titles[index] if index < len(titles) else ""
+                    existing_file = resolution.existing_files.get(video_url)
+                    if existing_file:
+                        completed_items.append((video_url, existing_file, title))
+                    else:
+                        queries_to_queue.append(video_url)
                 continue
 
+            unresolved_count += 1
             answer = QMessageBox.question(
                 self,
                 "Playlist Could Not Be Expanded",
@@ -470,19 +552,23 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.StandardButton.Yes:
                 queries_to_queue.append(resolution.playlist_url)
 
+        for video_url, output_file, title in completed_items:
+            self.download_manager.add_completed_task(video_url, output_file, title)
+
         if queries_to_queue:
             self.download_manager.add_tasks(queries_to_queue)
-            Toast.show_message(
-                self,
-                f"Added {len(queries_to_queue)} download(s) to queue",
-                "success",
-            )
-        else:
-            Toast.show_message(self, "No downloads were added", "warning", 3000)
+        self._playlist_resolution_active = False
+        result_parts = [f"{len(queries_to_queue)} queued", f"{len(completed_items)} already complete"]
+        if unresolved_count:
+            result_parts.append(f"{unresolved_count} unresolved")
+        self._set_status_message("Playlist resolution finished · " + " · ".join(result_parts))
 
     def _on_playlist_resolver_finished(self) -> None:
         self.add_button.setEnabled(True)
         self._playlist_resolver = None
+        if self._playlist_resolution_active:
+            self._playlist_resolution_active = False
+            self._set_status_message("Playlist resolution finished")
     
     def _process_query(self, text: str, mode: str) -> list[str]:
         """Process input text based on selected mode."""
@@ -510,7 +596,7 @@ class MainWindow(QMainWindow):
                 return [url] if is_youtube_url(url) else [f"ytsearch1:{self._append_song(text)}"]
         else:
             if is_valid_url(text):
-                Toast.show_message(self, "Only YouTube URLs are supported", "error", 3000)
+                self._show_feedback("Only YouTube URLs are supported", "error", 3000)
                 return []
 
             # No valid URLs, treat as search query
@@ -534,17 +620,17 @@ class MainWindow(QMainWindow):
         path = Path(file_path).expanduser()
 
         if path.suffix.lower() != ".txt":
-            Toast.show_message(self, "Please select a .txt file", "error", 3000)
+            self._show_feedback("Please select a .txt file", "error", 3000)
             return []
 
         if not path.is_file():
-            Toast.show_message(self, "Text file not found", "error", 3000)
+            self._show_feedback("Text file not found", "error", 3000)
             return []
 
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError as e:
-            Toast.show_message(self, f"Could not read file: {e}", "error", 4000)
+            self._show_feedback(f"Could not read file: {e}", "error", 4000)
             return []
 
         queries = []
@@ -566,7 +652,7 @@ class MainWindow(QMainWindow):
             queries.append(query)
 
         if not queries:
-            Toast.show_message(self, "No YouTube URLs or search names found in file", "error", 4000)
+            self._show_feedback("No YouTube URLs or search names found in file", "error", 4000)
 
         return queries
 
@@ -710,20 +796,20 @@ class MainWindow(QMainWindow):
         url = self.settings.playlist_urls.get(name) if hasattr(self.settings, "playlist_urls") else None
         if url:
             self.url_input.setText(url)
-            Toast.show_message(self, f"Loaded playlist '{name}' - Click 'Add to Queue' to download", "info", 3000)
+            self._show_feedback(f"Loaded playlist '{name}' - Click 'Add to Queue' to download", "info", 3000)
         else:
-            Toast.show_message(self, f"Output folder set for '{name}'", "info", 2000)
+            self._show_feedback(f"Output folder set for '{name}'", "info", 2000)
 
     def _on_save_playlist_folder_clicked(self) -> None:
         """Save the current output directory under a playlist name."""
         directory = self.output_dir_input.text().strip()
         if not directory:
-            Toast.show_message(self, "Please select an output directory first", "warning", 3000)
+            self._show_feedback("Please select an output directory first", "warning", 3000)
             return
 
         is_valid, error_message = is_valid_directory(directory)
         if not is_valid:
-            Toast.show_message(self, error_message, "error", 3000)
+            self._show_feedback(error_message, "error", 3000)
             return
 
         name, ok = QInputDialog.getText(
@@ -736,7 +822,7 @@ class MainWindow(QMainWindow):
 
         name = name.strip()
         if not name:
-            Toast.show_message(self, "Playlist name cannot be empty", "warning", 3000)
+            self._show_feedback("Playlist name cannot be empty", "warning", 3000)
             return
 
         if not hasattr(self.settings, "playlist_folders") or self.settings.playlist_folders is None:
@@ -769,7 +855,7 @@ class MainWindow(QMainWindow):
         if index != -1:
             self.playlist_combo.setCurrentIndex(index)
 
-        Toast.show_message(self, f"Saved folder for playlist '{name}'", "success", 3000)
+        self._show_feedback(f"Saved folder for playlist '{name}'", "success", 3000)
 
     def _on_manage_playlist_folders_clicked(self) -> None:
         """Open dialog to manage saved playlist-folder mappings."""
@@ -782,7 +868,7 @@ class MainWindow(QMainWindow):
             self.settings.playlist_urls = dialog.get_playlist_urls()
             self.settings_manager.save()
             self._refresh_playlist_folders()
-            Toast.show_message(self, "Updated saved playlists", "success", 2000)
+            self._show_feedback("Updated saved playlists", "success", 2000)
         
     def _on_start_all_clicked(self) -> None:
         """Handle start all button click."""
@@ -791,17 +877,17 @@ class MainWindow(QMainWindow):
     def _on_cancel_all_clicked(self) -> None:
         """Handle cancel all button click."""
         self.download_manager.cancel_all()
-        Toast.show_message(self, "Cancelled all downloads", "info")
+        self._show_feedback("Cancelled all downloads", "info")
     
     def _on_clear_completed_clicked(self) -> None:
         """Handle clear completed button click."""
         self.download_manager.clear_completed()
-        Toast.show_message(self, "Cleared completed downloads", "info", 2000)
+        self._show_feedback("Cleared completed downloads", "info", 2000)
     
     def _on_clear_failed_clicked(self) -> None:
         """Handle clear failed button click."""
         self.download_manager.clear_failed()
-        Toast.show_message(self, "Cleared failed downloads", "info", 2000)
+        self._show_feedback("Cleared failed downloads", "info", 2000)
     
     def _on_clear_all_clicked(self) -> None:
         """Handle clear all button click."""
@@ -815,7 +901,7 @@ class MainWindow(QMainWindow):
         
         if reply == QMessageBox.StandardButton.Yes:
             self.download_manager.clear_all()
-            Toast.show_message(self, "Cleared all downloads", "info", 2000)
+            self._show_feedback("Cleared all downloads", "info", 2000)
     
     def _on_settings_clicked(self) -> None:
         """Handle settings button click."""
@@ -823,7 +909,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings_manager.save()
             self.output_dir_input.setText(self.settings.output_dir)
-            Toast.show_message(self, "Settings saved", "success")
+            self._show_feedback("Settings saved", "success")
     
     def _on_task_added(self, task: DownloadTask) -> None:
         """Handle new task added."""
@@ -867,12 +953,80 @@ class MainWindow(QMainWindow):
     def _on_task_completed(self, task: DownloadTask) -> None:
         """Handle task completion."""
         logger.info(f"Task {task.id} completed")
-        Toast.show_message(self, "Download completed!", "success", 2000)
+        if task.error_message == "Already present and validated":
+            return
+        title = task.title or "Download completed"
+        self._show_system_notification("Download complete", title)
     
     def _on_task_failed(self, task: DownloadTask) -> None:
         """Handle task failure."""
         logger.error(f"Task {task.id} failed: {task.error_message}")
-        Toast.show_message(self, f"Download failed: {task.error_message[:50]}", "error", 4000)
+        title = task.title or f"Download {task.id}"
+        reason = (task.error_message or "Check the queue for details").strip()
+        self._show_system_notification("Download failed", f"{title}: {reason[:140]}", failed=True)
+
+    def _show_system_notification(self, title: str, message: str, failed: bool = False) -> None:
+        if self.tray_icon.isSystemTrayAvailable() and self.tray_icon.supportsMessages():
+            icon = (
+                QSystemTrayIcon.MessageIcon.Critical
+                if failed else QSystemTrayIcon.MessageIcon.Information
+            )
+            self.tray_icon.showMessage(
+                title, message, icon, 5000
+            )
+        else:
+            self._show_feedback(f"{title}: {message}", duration=8000)
+
+    def _show_feedback(self, message: str, toast_type: str = "info", duration: int = 3000) -> None:
+        """Show brief feedback without interrupting an active playlist resolution."""
+        del toast_type  # Retained at call sites for message category compatibility.
+        if self._playlist_resolution_active:
+            return
+        self._set_status_message(message, duration)
+
+    def _set_status_message(self, message: str, duration: int = 0) -> None:
+        self._status_message_generation += 1
+        generation = self._status_message_generation
+        self.status_message_label.set_message(message)
+        if duration > 0:
+            QTimer.singleShot(duration, lambda: self._clear_status_message(generation))
+
+    def _clear_status_message(self, generation: int) -> None:
+        if generation == self._status_message_generation and not self._playlist_resolution_active:
+            self._set_status_message("Ready")
+
+    def _show_queue_context_menu(self, position) -> None:
+        index = self.queue_table.indexAt(position)
+        if not index.isValid() or index.column() not in (1, 2):
+            return
+
+        row = index.row()
+        id_item = self.queue_table.item(row, 0)
+        if not id_item:
+            return
+        task = self.download_manager.get_task(int(id_item.text()))
+        if not task:
+            return
+
+        menu = QMenu(self)
+        if index.column() == 1:
+            menu.addAction("Copy name", lambda: self._copy_to_clipboard(task.title or ""))
+        else:
+            menu.addAction("Copy URL", lambda: self._copy_to_clipboard(task.url or ""))
+
+        if task.status == STATUS_FAILED:
+            menu.addSeparator()
+            menu.addAction("Retry", lambda task_id=task.id: self._retry_task(task_id))
+
+        menu.exec(self.queue_table.viewport().mapToGlobal(position))
+
+    def _copy_to_clipboard(self, value: str) -> None:
+        QApplication.clipboard().setText(value)
+        self._show_feedback("Copied to clipboard")
+
+    def _retry_task(self, task_id: int) -> None:
+        if self.download_manager.retry_task(task_id):
+            self._show_feedback(f"Retrying download {task_id}")
     
     def _refresh_table(self) -> None:
         """Rebuild the queue table from current tasks."""
@@ -924,15 +1078,19 @@ class MainWindow(QMainWindow):
         try:
             destination.mkdir(parents=True, exist_ok=True)
             if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(destination.resolve()))):
-                Toast.show_message(self, "Could not open destination folder", "error", 3000)
+                self._show_feedback("Could not open destination folder", "error", 3000)
         except OSError as error:
-            Toast.show_message(self, f"Could not open destination folder: {error}", "error", 4000)
+            self._show_feedback(f"Could not open destination folder: {error}", "error", 4000)
     
     def _update_stats(self) -> None:
-        """Update status bar with statistics."""
+        """Update the fixed right-side queue summary."""
         stats = self.download_manager.get_stats()
-        status_text = f"Total: {stats['total']} | Downloading: {stats['downloading']} | Completed: {stats['completed']} | Failed: {stats['failed']}"
-        self.statusBar().showMessage(status_text)
+        for key, (label, count_label) in self._queue_count_labels.items():
+            count_label.setText(f"{label} {stats[key]}")
+            count_label.setAccessibleName(f"{label}: {stats[key]}")
+            count_label.setProperty("attention", key == "failed" and stats[key] > 0)
+            count_label.style().unpolish(count_label)
+            count_label.style().polish(count_label)
     
     def _show_disclaimer(self) -> None:
         """Show disclaimer dialog on first run."""

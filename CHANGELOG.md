@@ -1,5 +1,12 @@
 # Changelog
 
+## Version 2.0.3
+
+### Added
+
+- Playlist downloads check the destination for existing audio files and mark valid files completed instead of downloading them again.
+- Missing, incomplete, or invalid playlist files are queued for download.
+
 ## Version 2.0.0 - Muzic YouTube-Only Downloads
 
 ### Changed

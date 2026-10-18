@@ -1,6 +1,10 @@
 """Resolve YouTube playlist URLs into individual video URLs."""
 import time
-from dataclasses import dataclass
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 from yt_dlp import YoutubeDL
@@ -14,6 +18,8 @@ class PlaylistResolution:
     playlist_url: str
     video_urls: list[str]
     error: str = ""
+    video_titles: list[str] = field(default_factory=list)
+    existing_files: dict[str, str] = field(default_factory=dict)
 
 
 class PlaylistResolver(QThread):
@@ -21,9 +27,12 @@ class PlaylistResolver(QThread):
 
     resolved = Signal(object)
 
-    def __init__(self, queries: list[str], timeout_seconds: int = 300, parent=None):
+    def __init__(self, queries: list[str], timeout_seconds: int = 300, output_dir: str = "", audio_format: str = "mp3", ffmpeg_path: str = "", parent=None):
         super().__init__(parent)
         self.queries = queries
+        self.output_dir = output_dir
+        self.audio_format = audio_format
+        self.ffmpeg_path = ffmpeg_path
         try:
             self.timeout_seconds = max(30, min(int(timeout_seconds or 300), 3600))
         except (TypeError, ValueError):
@@ -85,6 +94,7 @@ class PlaylistResolver(QThread):
         else:
             entries = []
         video_urls = []
+        video_titles = []
         seen = set()
         for entry in entries:
             if not isinstance(entry, dict):
@@ -96,7 +106,40 @@ class PlaylistResolver(QThread):
             if video_url and video_url not in seen:
                 seen.add(video_url)
                 video_urls.append(video_url)
+                video_titles.append(str(entry.get("title") or entry.get("id") or ""))
 
         if not video_urls:
             return PlaylistResolution(url, [], "No song URLs were found in this playlist")
-        return PlaylistResolution(url, video_urls)
+        existing_files = {}
+        for video_url, title in zip(video_urls, video_titles):
+            if title:
+                output_file = self._valid_existing_file(title)
+                if output_file:
+                    existing_files[video_url] = output_file
+        return PlaylistResolution(url, video_urls, video_titles=video_titles, existing_files=existing_files)
+
+    def _valid_existing_file(self, title: str) -> str:
+        """Return the expected playlist output when it exists and decodes cleanly."""
+        from yt_dlp.utils import sanitize_filename
+
+        safe_title = sanitize_filename(title, restricted=False)
+        candidate = Path(self.output_dir) / f"{safe_title}.{self.audio_format}"
+        if not candidate.is_file() or candidate.stat().st_size <= 0:
+            return ""
+
+        ffmpeg = self.ffmpeg_path or "ffmpeg"
+        if os.path.isdir(ffmpeg):
+            executable = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+            ffmpeg = os.path.join(ffmpeg, executable)
+        elif os.path.basename(ffmpeg).lower() in {"ffmpeg.exe", "ffmpeg"}:
+            ffmpeg = shutil.which(ffmpeg) or shutil.which("ffmpeg") or ffmpeg
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-v", "error", "-xerror", "-i", str(candidate), "-f", "null", "-"],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return str(candidate) if result.returncode == 0 else ""

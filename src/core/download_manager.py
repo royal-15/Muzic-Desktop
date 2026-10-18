@@ -54,6 +54,25 @@ class DownloadManager(QObject):
             task = self.add_task(url)
             tasks.append(task)
         return tasks
+
+    def add_completed_task(self, url: str, output_file: str, title: str = "") -> DownloadTask:
+        """Add a playlist item already present in the destination as completed."""
+        task = DownloadTask(
+            id=self._next_task_id,
+            url=url,
+            output_dir=str(Path(self.settings.output_dir).expanduser().resolve()),
+            status=STATUS_COMPLETED,
+            progress=100,
+            output_file=output_file,
+            error_message="Already present and validated",
+            title=title,
+        )
+        self._next_task_id += 1
+        self._tasks[task.id] = task
+        self.task_added.emit(task)
+        self.task_completed.emit(task)
+        self.queue_changed.emit()
+        return task
     
     def cancel_task(self, task_id: int) -> bool:
         """Cancel a specific task."""
@@ -69,6 +88,23 @@ class DownloadManager(QObject):
             self.queue_changed.emit()
             return True
         return False
+
+    def retry_task(self, task_id: int) -> bool:
+        """Requeue a failed task while preserving its ID and queue row."""
+        task = self._tasks.get(task_id)
+        if not task or task.status != STATUS_FAILED or task_id in self._workers:
+            return False
+
+        task.status = STATUS_QUEUED
+        task.progress = 0
+        task.speed = ""
+        task.eta = ""
+        task.output_file = None
+        task.error_message = None
+        self.task_updated.emit(task)
+        self.queue_changed.emit()
+        self._try_start_next_task()
+        return True
     
     def cancel_all(self) -> None:
         """Cancel all active and queued tasks."""

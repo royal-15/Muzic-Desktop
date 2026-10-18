@@ -265,6 +265,39 @@ QLabel#caption {{
     font-size: 12px;
 }}
 
+QStatusBar {{
+    background-color: {self.colors['surface']};
+    color: {self.colors['text_secondary']};
+    border-top: 1px solid {self.colors['border']};
+    padding: 3px 6px;
+}}
+
+QStatusBar::item {{
+    border: none;
+}}
+
+QLabel#statusMessage {{
+    color: {self.colors['text_secondary']};
+    padding: 2px 6px;
+}}
+
+QWidget#queueStatusCounts QLabel#queueCount {{
+    color: {self.colors['text_secondary']};
+    font-size: 11px;
+    padding: 2px 0;
+}}
+
+QWidget#queueStatusCounts QLabel#queueCountFailed {{
+    color: {self.colors['text_secondary']};
+    font-size: 11px;
+    padding: 2px 0;
+}}
+
+QWidget#queueStatusCounts QLabel#queueCountFailed[attention="true"] {{
+    color: {self.colors['error']};
+    font-weight: 600;
+}}
+
 /* Dialog */
 QDialog {{
     background-color: {self.colors['background']};
